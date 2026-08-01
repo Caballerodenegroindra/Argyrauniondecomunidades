@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   Shield, Users, Sparkles, Lock, Mail, Phone, User as UserIcon,
   CheckCircle2, XCircle, ChevronRight, LogOut, Settings, ClipboardList,
-  ExternalLink, AlertCircle, Loader2
+  ExternalLink, AlertCircle, Loader2, Home, Newspaper, Crown,
+  MessageCircle, Plus, Trash2, ArrowLeft
 } from "lucide-react";
 import {
   createUserWithEmailAndPassword,
@@ -12,6 +13,7 @@ import {
 } from "firebase/auth";
 import {
   doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs,
+  query, orderBy,
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
 
@@ -146,6 +148,23 @@ function validatePhone(raw) {
     return { valid: false, message: "El número después del código de país parece incompleto o inventado." };
   }
   return { valid: true, message: "" };
+}
+
+// Convierte un teléfono guardado (ej: "+51999999999") en un enlace wa.me
+function waLink(phone) {
+  const digits = (phone || "").replace(/[^0-9]/g, "");
+  return digits ? `https://wa.me/${digits}` : null;
+}
+
+// Mantiene sincronizado el "directorio público" (users/{uid} -> directory/{uid})
+// con solo la info que es segura mostrar a cualquier miembro logueado
+// (nick, rango y estado), sin exponer teléfono ni correo.
+async function syncDirectory(uid, data) {
+  try {
+    await setDoc(doc(db, "directory", uid), data, { merge: true });
+  } catch (e) {
+    // Si las reglas todavía no están desplegadas, no rompemos el flujo principal.
+  }
 }
 
 function firebaseErrorToMessage(err) {
@@ -319,6 +338,7 @@ function AuthScreen() {
           createdAt: Date.now(),
         });
         await setDoc(nameRef, { uid: cred.user.uid, email: email.trim() });
+        await syncDirectory(cred.user.uid, { nick: nick.trim(), rank: null, status: "survey-pending" });
         // onAuthStateChanged en el componente raíz recoge la sesión desde aquí.
       } else {
         const nameSnap = await getDoc(doc(db, "usernames", nickLower));
@@ -441,6 +461,7 @@ function SurveyScreen({ uid, onDone }) {
       answers: { experiencia: q1, tareas: q2, tareasDetalle },
       status: "terms-pending",
     });
+    await syncDirectory(uid, { status: "terms-pending" });
     setSaving(false);
     onDone();
   };
@@ -552,6 +573,7 @@ function TermsScreen({ uid, onSubmitted }) {
   const send = async () => {
     setSending(true);
     await updateDoc(doc(db, "users", uid), { status: "submitted", submittedAt: Date.now() });
+    await syncDirectory(uid, { status: "submitted" });
     setSending(false);
     onSubmitted();
   };
@@ -674,6 +696,427 @@ function ProfileScreen({ record, onLogout }) {
   );
 }
 
+/* ---------------- Navegación principal (post-onboarding) ---------------- */
+
+function TopBar({ title, onBack }) {
+  return (
+    <div className="flex items-center gap-3 mb-5">
+      {onBack && (
+        <button onClick={onBack} className="text-[#96939F] hover:text-[#F2F0EB]">
+          <ArrowLeft size={18} />
+        </button>
+      )}
+      <div className="text-lg font-semibold">{title}</div>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab, isAdmin }) {
+  const items = [
+    { key: "home", label: "Inicio", icon: Home },
+    { key: "directory", label: "Comunidad", icon: Users },
+    { key: "leaders", label: "Líderes", icon: Crown },
+    { key: "profile", label: "Perfil", icon: UserIcon },
+  ];
+  if (isAdmin) items.push({ key: "admin", label: "Admin", icon: Shield });
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-20 bg-[#12131A]/95 backdrop-blur border-t border-[#2A2C38]">
+      <div className="max-w-md mx-auto flex">
+        {items.map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={cx(
+              "flex-1 flex flex-col items-center gap-1 py-2.5 text-[10px] uppercase tracking-wide transition-colors",
+              tab === key ? "text-[#6C6CF0]" : "text-[#5B5866] hover:text-[#96939F]"
+            )}
+          >
+            <Icon size={18} />
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Inicio: noticias / información de la comunidad ---------------- */
+
+function HomeFeed({ isAdmin }) {
+  const [news, setNews] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const q = query(collection(db, "news"), orderBy("createdAt", "desc"));
+      const snap = await getDocs(q);
+      setNews(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    } catch (e) {
+      setError("No se pudieron cargar las noticias.");
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const publish = async () => {
+    if (!title.trim() || !body.trim()) return;
+    setSaving(true);
+    try {
+      const id = `n_${Date.now()}`;
+      await setDoc(doc(db, "news", id), {
+        title: title.trim(),
+        body: body.trim(),
+        createdAt: Date.now(),
+      });
+      setTitle(""); setBody(""); setShowForm(false);
+      await load();
+    } catch (e) {
+      setError("No se pudo publicar la noticia.");
+    }
+    setSaving(false);
+  };
+
+  const remove = async (id) => {
+    const sure = window.confirm("¿Eliminar esta publicación?");
+    if (!sure) return;
+    await deleteDoc(doc(db, "news", id));
+    load();
+  };
+
+  return (
+    <div>
+      <TopBar title="Inicio" />
+      <div className="text-sm text-[#96939F] mb-5">
+        Noticias e información de la Unión de Comunidades.
+      </div>
+
+      {isAdmin && (
+        <div className="mb-5">
+          {!showForm ? (
+            <button
+              onClick={() => setShowForm(true)}
+              className="w-full flex items-center justify-center gap-2 border border-dashed border-[#2A2C38] hover:border-[#6C6CF0] rounded-xl py-3 text-sm text-[#96939F] hover:text-[#6C6CF0] transition-colors"
+            >
+              <Plus size={15} /> Publicar noticia
+            </button>
+          ) : (
+            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5">
+              <Field label="Título" placeholder="Título de la noticia" value={title} onChange={(e) => setTitle(e.target.value)} />
+              <label className="block mb-4">
+                <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Contenido</span>
+                <textarea
+                  value={body}
+                  onChange={(e) => setBody(e.target.value)}
+                  rows={4}
+                  className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB] outline-none focus:border-[#6C6CF0] resize-none"
+                  placeholder="Escribe la información para la comunidad..."
+                />
+              </label>
+              <div className="flex gap-2">
+                <PrimaryButton onClick={publish} disabled={saving || !title.trim() || !body.trim()}>
+                  {saving ? <Loader2 size={16} className="animate-spin" /> : "Publicar"}
+                </PrimaryButton>
+                <button onClick={() => setShowForm(false)} className="px-4 text-sm text-[#96939F] hover:text-[#F2F0EB]">
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {loading && (
+        <div className="flex items-center gap-2 text-sm text-[#96939F]">
+          <Loader2 size={14} className="animate-spin" /> Cargando…
+        </div>
+      )}
+
+      {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
+
+      {!loading && !error && news.length === 0 && (
+        <div className="text-sm text-[#5B5866] text-center py-10">
+          <Newspaper size={22} className="mx-auto mb-2 opacity-50" />
+          Todavía no hay noticias publicadas.
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {news.map((n) => (
+          <div key={n.id} className="bg-[#16171F] border border-[#2A2C38] rounded-xl p-4">
+            <div className="flex items-start justify-between gap-2 mb-1.5">
+              <div className="font-medium text-sm">{n.title}</div>
+              {isAdmin && (
+                <button onClick={() => remove(n.id)} className="text-[#5B5866] hover:text-[#E07A7A] shrink-0">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+            <p className="text-sm text-[#D8D5E0] whitespace-pre-wrap">{n.body}</p>
+            {n.createdAt && (
+              <div className="text-[11px] text-[#5B5866] mt-2">
+                {new Date(n.createdAt).toLocaleDateString()}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Comunidad: directorio de miembros ---------------- */
+
+function DirectoryScreen() {
+  const [members, setMembers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        const snap = await getDocs(collection(db, "directory"));
+        const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        recs.sort((a, b) => {
+          const ra = a.rank ? RANK_ORDER.indexOf(a.rank) : 99;
+          const rb = b.rank ? RANK_ORDER.indexOf(b.rank) : 99;
+          if (ra !== rb) return ra - rb;
+          return (a.nick || "").localeCompare(b.nick || "");
+        });
+        setMembers(recs);
+      } catch (e) {
+        setError("No se pudo cargar la lista de miembros.");
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  return (
+    <div>
+      <TopBar title="Comunidad" />
+      <div className="text-sm text-[#96939F] mb-5">
+        Todos los miembros registrados de la Unión, junto a su rango.
+      </div>
+
+      {loading && (
+        <div className="flex items-center gap-2 text-sm text-[#96939F]">
+          <Loader2 size={14} className="animate-spin" /> Cargando…
+        </div>
+      )}
+      {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
+
+      {!loading && !error && (
+        <div className="space-y-2">
+          {members.map((m) => {
+            const r = m.rank ? RANKS[m.rank] : null;
+            return (
+              <div key={m.id} className="flex items-center justify-between bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
+                <span>{m.nick || "Usuario"}</span>
+                {r ? (
+                  <span className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
+                    {r.label}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Líderes: Cúpula y Alto Consejo ---------------- */
+
+function LeadersScreen({ isSuperAdmin }) {
+  const [leaders, setLeaders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [nick, setNick] = useState("");
+  const [customTitle, setCustomTitle] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const snap = await getDocs(collection(db, "leaders"));
+      const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      recs.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+      setLeaders(recs);
+    } catch (e) {
+      setError("No se pudo cargar la lista de líderes.");
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const addLeader = async () => {
+    setFormError("");
+    const nickLower = nick.trim().toLowerCase();
+    if (!nickLower) {
+      setFormError("Escribe el nick del usuario.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const nameSnap = await getDoc(doc(db, "usernames", nickLower));
+      if (!nameSnap.exists()) {
+        setFormError("No existe ningún usuario registrado con ese nick.");
+        setSaving(false);
+        return;
+      }
+      const { uid } = nameSnap.data();
+      const userSnap = await getDoc(doc(db, "users", uid));
+      const u = userSnap.exists() ? userSnap.data() : {};
+      await setDoc(doc(db, "leaders", uid), {
+        nick: u.nick || nick.trim(),
+        phone: u.phone || "",
+        title: customTitle.trim() || "Cúpula y Alto Consejo",
+        addedAt: Date.now(),
+      });
+      setNick(""); setCustomTitle(""); setShowForm(false);
+      await load();
+    } catch (e) {
+      setFormError("No se pudo agregar al líder. Intenta de nuevo.");
+    }
+    setSaving(false);
+  };
+
+  const removeLeader = async (uid) => {
+    const sure = window.confirm("¿Quitar a esta persona de la lista de líderes?");
+    if (!sure) return;
+    await deleteDoc(doc(db, "leaders", uid));
+    load();
+  };
+
+  if (selected) {
+    const wa = waLink(selected.phone);
+    return (
+      <div>
+        <TopBar title="Perfil del líder" onBack={() => setSelected(null)} />
+        <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6 text-center">
+          <div className="w-16 h-16 mx-auto rounded-full bg-[#C9A036]/15 border border-[#C9A036]/40 flex items-center justify-center mb-3">
+            <Crown size={24} className="text-[#C9A036]" />
+          </div>
+          <div className="text-lg font-semibold">{selected.nick}</div>
+          <div className="text-xs text-[#96939F] mb-5">{selected.title}</div>
+          {wa ? (
+            <a
+              href={wa} target="_blank" rel="noreferrer"
+              className="w-full flex items-center justify-center gap-2 bg-[#4E9A6B] hover:bg-[#43855C] text-white font-medium text-sm rounded-lg px-4 py-2.5 transition-colors"
+            >
+              <MessageCircle size={16} /> Contactar por WhatsApp
+            </a>
+          ) : (
+            <p className="text-xs text-[#5B5866]">Este líder aún no tiene un número configurado.</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <TopBar title="Líderes" />
+      <div className="text-sm text-[#96939F] mb-1">
+        Cúpula y Alto Consejo — Los Jefes y Liderazgo Máximo
+      </div>
+      <p className="text-xs text-[#5B5866] mb-5">
+        Son las autoridades más altas de la comunidad. No moderan el chat del día a día,
+        sino que toman las decisiones más importantes sobre el futuro de la Unión.
+        Son los creadores y dueños del proyecto: tienen la última palabra sobre cualquier
+        asunto, y su decisión es definitiva ante cualquier desacuerdo grave.
+      </p>
+
+      {isSuperAdmin && (
+        <div className="mb-5">
+          {!showForm ? (
+            <button
+              onClick={() => setShowForm(true)}
+              className="w-full flex items-center justify-center gap-2 border border-dashed border-[#2A2C38] hover:border-[#C9A036] rounded-xl py-3 text-sm text-[#96939F] hover:text-[#C9A036] transition-colors"
+            >
+              <Plus size={15} /> Agregar líder
+            </button>
+          ) : (
+            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5">
+              <p className="text-xs text-[#96939F] mb-4">
+                El nick debe pertenecer a un usuario ya registrado en Argyra.
+              </p>
+              <Field
+                icon={UserIcon}
+                label="Nick del usuario"
+                placeholder="ejemplo: mariposa"
+                value={nick}
+                onChange={(e) => setNick(e.target.value)}
+                error={formError}
+              />
+              <Field
+                label="Título / cargo (opcional)"
+                placeholder="Cúpula y Alto Consejo"
+                value={customTitle}
+                onChange={(e) => setCustomTitle(e.target.value)}
+              />
+              <div className="flex gap-2">
+                <PrimaryButton onClick={addLeader} disabled={saving}>
+                  {saving ? <Loader2 size={16} className="animate-spin" /> : "Agregar"}
+                </PrimaryButton>
+                <button onClick={() => setShowForm(false)} className="px-4 text-sm text-[#96939F] hover:text-[#F2F0EB]">
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {loading && (
+        <div className="flex items-center gap-2 text-sm text-[#96939F]">
+          <Loader2 size={14} className="animate-spin" /> Cargando…
+        </div>
+      )}
+      {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
+      {!loading && !error && leaders.length === 0 && (
+        <div className="text-sm text-[#5B5866] text-center py-10">
+          <Crown size={22} className="mx-auto mb-2 opacity-50" />
+          Todavía no se agregaron líderes.
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {leaders.map((l) => (
+          <div key={l.id} className="flex items-center bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-3">
+            <button onClick={() => setSelected(l)} className="flex-1 text-left flex items-center gap-3">
+              <Crown size={16} className="text-[#C9A036] shrink-0" />
+              <div>
+                <div className="text-sm font-medium">{l.nick}</div>
+                <div className="text-[11px] text-[#96939F]">{l.title}</div>
+              </div>
+            </button>
+            {isSuperAdmin && (
+              <button onClick={() => removeLeader(l.id)} className="text-[#5B5866] hover:text-[#E07A7A] shrink-0 ml-2">
+                <Trash2 size={14} />
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Admin ---------------- */
 
 function AdminPanel({ onExit, currentUid }) {
@@ -688,24 +1131,38 @@ function AdminPanel({ onExit, currentUid }) {
   const [granting, setGranting] = useState(false);
   const [grantError, setGrantError] = useState("");
   const [grantMsg, setGrantMsg] = useState("");
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
-    const snap = await getDocs(collection(db, "users"));
-    const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    recs.sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
-    setUsers(recs);
-    const lr = await getDoc(doc(db, "config", "rankLinks"));
-    setLinks(lr.exists() ? lr.data() : emptyLinks());
-    const adminsSnap = await getDocs(collection(db, "admins"));
-    setAdminUids(adminsSnap.docs.map((d) => d.id));
+    setLoadError("");
+    try {
+      const snap = await getDocs(collection(db, "users"));
+      const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      recs.sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+      setUsers(recs);
+
+      // Pone al día el directorio público para cuentas que se registraron
+      // antes de que existiera esta sección (no bloquea la carga del panel).
+      recs.forEach((u) => {
+        syncDirectory(u.id, { nick: u.nick || "", rank: u.rank || null, status: u.status || "survey-pending" });
+      });
+      const lr = await getDoc(doc(db, "config", "rankLinks"));
+      setLinks(lr.exists() ? lr.data() : emptyLinks());
+      const adminsSnap = await getDocs(collection(db, "admins"));
+      setAdminUids(adminsSnap.docs.map((d) => d.id));
+    } catch (e) {
+      setLoadError(e?.message || "No se pudo cargar la información del panel.");
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
   const decide = async (user, status, rank) => {
-    await updateDoc(doc(db, "users", user.id), { status, rank: rank || user.rank || null });
+    const finalRank = rank || user.rank || null;
+    await updateDoc(doc(db, "users", user.id), { status, rank: finalRank });
+    await syncDirectory(user.id, { status, rank: finalRank });
     load();
   };
 
@@ -784,7 +1241,17 @@ function AdminPanel({ onExit, currentUid }) {
           </div>
         )}
 
-        {!loading && tab === "solicitudes" && (
+        {!loading && loadError && (
+          <div className="bg-[#16171F] border border-[#E07A7A]/40 rounded-2xl p-6">
+            <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-3">
+              <AlertCircle size={15} /> No se pudo cargar el panel
+            </div>
+            <p className="text-xs text-[#96939F] mb-4 break-words">{loadError}</p>
+            <PrimaryButton onClick={load}>Reintentar</PrimaryButton>
+          </div>
+        )}
+
+        {!loading && !loadError && tab === "solicitudes" && (
           <div className="space-y-4">
             <div>
               <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Pendientes ({solicitudes.length})</div>
@@ -817,7 +1284,7 @@ function AdminPanel({ onExit, currentUid }) {
           </div>
         )}
 
-        {!loading && tab === "enlaces" && (
+        {!loading && !loadError && tab === "enlaces" && (
           <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6 space-y-5">
             {RANK_ORDER.map((k) => (
               <div key={k}>
@@ -844,7 +1311,7 @@ function AdminPanel({ onExit, currentUid }) {
           </div>
         )}
 
-        {!loading && tab === "admins" && (
+        {!loading && !loadError && tab === "admins" && (
           <div className="space-y-5">
             <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
               <div className="text-sm font-medium mb-1">Otorgar acceso de administrador</div>
@@ -952,8 +1419,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState(null); // firebase auth user
   const [record, setRecord] = useState(null); // Firestore users/{uid}
-  const [adminMode, setAdminMode] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(null); // null = checking
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [tab, setTab] = useState("home");
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
@@ -982,8 +1449,18 @@ export default function App() {
             // volver a intentar en el siguiente inicio de sesión.
           }
         }
+
+        // Cada quien que inicia sesión (indrhack u otro admin que él haya
+        // otorgado) ve automáticamente su opción de Admin integrada.
+        try {
+          const adminSnap = await getDoc(doc(db, "admins", fbUser.uid));
+          setIsAdmin(adminSnap.exists());
+        } catch (e) {
+          setIsAdmin(false);
+        }
       } else {
         setRecord(null);
+        setIsAdmin(false);
       }
       setLoading(false);
     });
@@ -996,15 +1473,9 @@ export default function App() {
     setRecord(snap.exists() ? snap.data() : null);
   }, [user]);
 
-  const enterAdmin = async () => {
-    if (!user) return;
-    const snap = await getDoc(doc(db, "admins", user.uid));
-    setIsAdmin(snap.exists());
-    setAdminMode(true);
-  };
-
   const logout = async () => {
     await signOut(auth);
+    setTab("home");
   };
 
   if (loading) {
@@ -1017,39 +1488,37 @@ export default function App() {
     );
   }
 
-  if (adminMode) {
-    if (isAdmin === false) return <NoAdminAccess onExit={() => setAdminMode(false)} />;
-    if (isAdmin === true) return <AdminPanel onExit={() => setAdminMode(false)} currentUid={user.uid} />;
-    return (
-      <Shell>
-        <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center">
-          <Loader2 size={16} className="animate-spin" /> Verificando acceso…
-        </div>
-      </Shell>
-    );
+  // Antes de tener cuenta o de terminar el registro (encuesta / términos),
+  // se mantiene el flujo de onboarding tal cual, sin la navegación principal.
+  if (!user || !record) {
+    return <AuthScreen />;
+  }
+  if (record.status === "survey-pending") {
+    return <SurveyScreen uid={user.uid} onDone={refresh} />;
+  }
+  if (record.status === "terms-pending") {
+    return <TermsScreen uid={user.uid} onSubmitted={refresh} />;
+  }
+
+  // Ya con cuenta activa: al iniciar sesión, la persona entra directo a
+  // una página de contenido (Inicio) con navegación integrada, incluyendo
+  // el panel de administración para quien tenga ese acceso.
+  const isSuperAdmin = record.nick && record.nick.trim().toLowerCase() === "indrhack";
+
+  if (tab === "admin" && isAdmin) {
+    return <AdminPanel onExit={() => setTab("home")} currentUid={user.uid} isSuperAdmin={isSuperAdmin} />;
   }
 
   let body;
-  if (!user || !record) {
-    body = <AuthScreen />;
-  } else if (record.status === "survey-pending") {
-    body = <SurveyScreen uid={user.uid} onDone={refresh} />;
-  } else if (record.status === "terms-pending") {
-    body = <TermsScreen uid={user.uid} onSubmitted={refresh} />;
-  } else {
-    body = <ProfileScreen record={record} onLogout={logout} />;
-  }
+  if (tab === "directory") body = <DirectoryScreen />;
+  else if (tab === "leaders") body = <LeadersScreen isSuperAdmin={isSuperAdmin} />;
+  else if (tab === "profile") body = <ProfileScreen record={record} onLogout={logout} />;
+  else body = <HomeFeed isAdmin={isAdmin} />;
 
   return (
-    <div>
-      {body}
-      {user && (
-        <div className="text-center pb-6 relative z-10 -mt-6">
-          <button onClick={enterAdmin} className="text-[10px] text-[#5B5866] hover:text-[#96939F] tracking-wide uppercase">
-            Panel de administración
-          </button>
-        </div>
-      )}
-    </div>
+    <Shell>
+      <div className="w-full max-w-md pb-16">{body}</div>
+      <BottomNav tab={tab} setTab={setTab} isAdmin={isAdmin} />
+    </Shell>
   );
 }
