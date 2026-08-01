@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Mapeo nick -> {uid, email}. Necesita lectura pública porque el login
+    // por nick busca aquí ANTES de que la persona esté autenticada.
+    // Solo expone el correo asociado a un nick, nunca contraseñas
+    // (Firebase Auth jamás guarda ni expone contraseñas en Firestore).
+    match /usernames/{nick} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.uid;
+      allow update, delete: if false;
+    }
+
+    // Perfil de cada usuario.
+    match /users/{uid} {
+      allow create: if isSignedIn() && request.auth.uid == uid;
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      // El dueño puede editar su propio perfil MIENTRAS no esté resuelto
+      // (para completar encuesta/enviar solicitud). Ya con status
+      // accepted/rejected, solo un admin puede tocar el documento
+      // (para asignar o cambiar rango).
+      allow update: if isAdmin() || (
+        request.auth.uid == uid &&
+        resource.data.status != "accepted" &&
+        resource.data.status != "rejected"
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Enlaces de WhatsApp por rango: cualquier usuario autenticado los lee
+    // (para ver los suyos en su perfil); solo un admin los edita.
+    match /config/rankLinks {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Lista de administradores. Se gestiona a mano desde la consola de
+    // Firebase (ver README) — nadie puede escribirla desde la app.
+    match /admins/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+  }
+}
