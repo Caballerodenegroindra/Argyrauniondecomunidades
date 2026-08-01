@@ -11,7 +11,7 @@ import {
   onAuthStateChanged,
 } from "firebase/auth";
 import {
-  doc, getDoc, setDoc, updateDoc, collection, getDocs,
+  doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs,
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
 
@@ -52,11 +52,100 @@ const RANKS = {
 
 const RANK_ORDER = ["kangu", "domeisha", "taicho", "sinchan"];
 
+// Tareas específicas de cada rango: al elegir un rango en la encuesta,
+// la persona debe marcar en cuál(es) de estas puede apoyar puntualmente.
+const SUBTASKS = {
+  kangu: [
+    "Buscar alianzas con otros grupos para que se unan a la comunidad",
+    "Hacer cumplir las reglas en cada grupo y borrar spam",
+    "Calmar discusiones",
+    "Apoyar a miembros en lo que necesiten",
+    "Detectar usuarios que generan spam o hackers",
+  ],
+  domeisha: [
+    "Programación e ingeniería",
+    "Crear, actualizar y reparar las herramientas de la comunidad",
+    "Planear nuevas herramientas y funciones",
+  ],
+  taicho: [
+    "Ayudar a los nuevos miembros a acoplarse, guiándolos",
+    "Informar a los administradores nuevos cómo funciona la comunidad",
+    "Aportar conocimiento",
+    "Apoyar a todos los admin líderes",
+  ],
+  sinchan: [
+    "Quiero aprender",
+    "Quiero ayudar",
+    "Quiero apoyar",
+  ],
+};
+
 const emptyLinks = () =>
   RANK_ORDER.reduce((acc, k) => ({ ...acc, [k]: { general: "", especifico: "" } }), {});
 
 function cx(...a) {
   return a.filter(Boolean).join(" ");
+}
+
+/* ---------------- Validación de nombre y teléfono ---------------- */
+
+// Solo letras (incluye acentos y ñ), sin espacios, números ni símbolos.
+const NAME_REGEX = /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+$/;
+function isValidName(str) {
+  return NAME_REGEX.test(str);
+}
+// Filtra en tiempo real cualquier carácter que no sea una letra.
+function sanitizeName(str) {
+  return str.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, "");
+}
+
+// Deja pasar solo dígitos y un único "+" al inicio (número "todo junto").
+function sanitizePhone(str) {
+  let v = str.replace(/[^0-9+]/g, "");
+  const hasPlus = v.startsWith("+");
+  v = v.replace(/\+/g, "");
+  return hasPlus ? "+" + v : v;
+}
+
+// Códigos de discado internacional (E.164) realmente asignados por la UIT.
+// Se usa para detectar números "inventados" cuyo código de país no existe.
+const COUNTRY_CODES = [
+  "1","7","20","27","30","31","32","33","34","36","39","40","41","43","44","45","46","47","48","49",
+  "51","52","53","54","55","56","57","58","60","61","62","63","64","65","66","81","82","84","86","90","91","92","93","94","95","98",
+  "211","212","213","216","218","220","221","222","223","224","225","226","227","228","229",
+  "230","231","232","233","234","235","236","237","238","239","240","241","242","243","244","245","246","248","249",
+  "250","251","252","253","254","255","256","257","258","260","261","262","263","264","265","266","267","268","269",
+  "290","291","297","298","299",
+  "350","351","352","353","354","355","356","357","358","359",
+  "370","371","372","373","374","375","376","377","378","380","381","382","383","385","386","387","389",
+  "420","421","423",
+  "500","501","502","503","504","505","506","507","508","509",
+  "590","591","592","593","594","595","596","597","598","599",
+  "670","672","673","674","675","676","677","678","679","680","681","682","683","685","686","687","688","689","690","691","692",
+  "850","852","853","855","856",
+  "880","886",
+  "960","961","962","963","964","965","966","967","968","970","971","972","973","974","975","976","977",
+  "992","993","994","995","996","998",
+].sort((a, b) => b.length - a.length); // probar primero los códigos más largos
+
+function validatePhone(raw) {
+  const val = (raw || "").trim();
+  if (!/^\+?[0-9]+$/.test(val) || val.replace(/\+/g, "").length === 0) {
+    return { valid: false, message: "El número debe ser solo dígitos, todo junto (puedes iniciar con +)." };
+  }
+  const digits = val.startsWith("+") ? val.slice(1) : val;
+  if (digits.length < 8 || digits.length > 15) {
+    return { valid: false, message: "Revisa la cantidad de dígitos: falta o sobra la cantidad de números." };
+  }
+  const code = COUNTRY_CODES.find((c) => digits.startsWith(c));
+  if (!code) {
+    return { valid: false, message: "El código de país/área no existe. Revisa tu número (ej: +51 para Perú)." };
+  }
+  const rest = digits.slice(code.length);
+  if (rest.length < 5 || rest.length > 12) {
+    return { valid: false, message: "El número después del código de país parece incompleto o inventado." };
+  }
+  return { valid: true, message: "" };
 }
 
 function firebaseErrorToMessage(err) {
@@ -73,17 +162,27 @@ function firebaseErrorToMessage(err) {
 
 /* ---------------- UI atoms ---------------- */
 
-function Field({ icon: Icon, label, ...props }) {
+function Field({ icon: Icon, label, hint, error, ...props }) {
   return (
     <label className="block mb-4">
       <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">{label}</span>
-      <div className="flex items-center gap-2 bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 focus-within:border-[#6C6CF0] transition-colors">
+      <div
+        className={cx(
+          "flex items-center gap-2 bg-[#1D1F2A] border rounded-lg px-3 py-2.5 focus-within:border-[#6C6CF0] transition-colors",
+          error ? "border-[#E07A7A]" : "border-[#2A2C38]"
+        )}
+      >
         {Icon && <Icon size={16} className="text-[#6C6CF0] shrink-0" />}
         <input
           {...props}
           className="bg-transparent outline-none w-full text-[#F2F0EB] placeholder:text-[#5B5866] text-sm"
         />
       </div>
+      {error ? (
+        <span className="block text-[11px] text-[#E07A7A] mt-1">{error}</span>
+      ) : hint ? (
+        <span className="block text-[11px] text-[#5B5866] mt-1">{hint}</span>
+      ) : null}
     </label>
   );
 }
@@ -159,6 +258,23 @@ function AuthScreen() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const handleNickChange = (e) => {
+    const v = e.target.value;
+    // En login dejamos escribir libre (por si el nick ya existente tuviera
+    // formato antiguo); en registro forzamos solo letras desde que escribe.
+    setNick(mode === "register" ? sanitizeName(v) : v);
+  };
+
+  const handlePhoneChange = (e) => {
+    setPhone(sanitizePhone(e.target.value));
+  };
+
+  const nickError = mode === "register" && nick.length > 0 && !isValidName(nick)
+    ? "Solo letras, sin espacios ni símbolos."
+    : "";
+  const phoneCheck = mode === "register" && phone.length > 0 ? validatePhone(phone) : null;
+  const phoneError = phoneCheck && !phoneCheck.valid ? phoneCheck.message : "";
+
   const submit = async () => {
     setError("");
     if (!nick.trim() || !password) {
@@ -171,6 +287,17 @@ function AuthScreen() {
       if (mode === "register") {
         if (!phone.trim() || !email.trim()) {
           setError("Completa tu número y tu correo electrónico.");
+          setBusy(false);
+          return;
+        }
+        if (!isValidName(nick.trim())) {
+          setError("El nombre solo puede tener letras, sin espacios ni símbolos.");
+          setBusy(false);
+          return;
+        }
+        const phoneResult = validatePhone(phone.trim());
+        if (!phoneResult.valid) {
+          setError(phoneResult.message);
           setBusy(false);
           return;
         }
@@ -227,11 +354,28 @@ function AuthScreen() {
           </button>
         </div>
 
-        <Field icon={UserIcon} label="Nick o nombre" placeholder="Tu nombre ficticio" value={nick} onChange={(e) => setNick(e.target.value)} />
+        <Field
+          icon={UserIcon}
+          label="Nick o nombre"
+          placeholder="TuNombre"
+          value={nick}
+          onChange={handleNickChange}
+          error={nickError}
+          hint={mode === "register" && !nickError ? "Solo letras, sin espacios ni símbolos." : undefined}
+        />
         <Field icon={Lock} label="Contraseña" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
         {mode === "register" && (
           <>
-            <Field icon={Phone} label="Número de teléfono (para el grupo)" placeholder="+51 999 999 999" value={phone} onChange={(e) => setPhone(e.target.value)} />
+            <Field
+              icon={Phone}
+              label="Número de teléfono (para el grupo)"
+              placeholder="+51999999999"
+              inputMode="tel"
+              value={phone}
+              onChange={handlePhoneChange}
+              error={phoneError}
+              hint={!phoneError ? "Todo junto, con código de país real (ej: +51...)." : undefined}
+            />
             <Field icon={Mail} label="Correo electrónico (para recuperar tu cuenta)" type="email" placeholder="tucorreo@ejemplo.com" value={email} onChange={(e) => setEmail(e.target.value)} />
           </>
         )}
@@ -242,7 +386,7 @@ function AuthScreen() {
           </div>
         )}
 
-        <PrimaryButton onClick={submit} disabled={busy}>
+        <PrimaryButton onClick={submit} disabled={busy || (mode === "register" && (!!nickError || !!phoneError))}>
           {busy ? <Loader2 size={16} className="animate-spin" /> : null}
           {mode === "register" ? "Comenzar la encuesta" : "Ingresar"}
           {!busy && <ChevronRight size={16} />}
@@ -258,20 +402,43 @@ function SurveyScreen({ uid, onDone }) {
   const [step, setStep] = useState(0);
   const [q1, setQ1] = useState(null);
   const [q2, setQ2] = useState([]);
+  const [q2Details, setQ2Details] = useState({}); // { [rankKey]: [subtaskIndex, ...] }
   const [saving, setSaving] = useState(false);
 
   const toggleQ2 = (key) => {
     setQ2((prev) => {
-      if (prev.includes(key)) return prev.filter((k) => k !== key);
+      if (prev.includes(key)) {
+        setQ2Details((d) => {
+          const next = { ...d };
+          delete next[key];
+          return next;
+        });
+        return prev.filter((k) => k !== key);
+      }
       if (prev.length >= 3) return prev;
       return [...prev, key];
     });
   };
 
+  const toggleSubtask = (rankKey, idx) => {
+    setQ2Details((prev) => {
+      const cur = prev[rankKey] || [];
+      const next = cur.includes(idx) ? cur.filter((i) => i !== idx) : [...cur, idx];
+      return { ...prev, [rankKey]: next };
+    });
+  };
+
+  // Cada rango elegido necesita al menos una tarea específica marcada.
+  const missingDetails = q2.some((k) => !(q2Details[k] && q2Details[k].length > 0));
+
   const finishSurvey = async () => {
     setSaving(true);
+    const tareasDetalle = {};
+    q2.forEach((k) => {
+      tareasDetalle[k] = (q2Details[k] || []).map((idx) => SUBTASKS[k][idx]);
+    });
     await updateDoc(doc(db, "users", uid), {
-      answers: { experiencia: q1, tareas: q2 },
+      answers: { experiencia: q1, tareas: q2, tareasDetalle },
       status: "terms-pending",
     });
     setSaving(false);
@@ -312,25 +479,62 @@ function SurveyScreen({ uid, onDone }) {
               {RANK_ORDER.map((k) => {
                 const r = RANKS[k];
                 const active = q2.includes(k);
+                const details = q2Details[k] || [];
                 return (
-                  <button
+                  <div
                     key={k}
-                    onClick={() => toggleQ2(k)}
-                    className={cx("w-full text-left px-4 py-3 rounded-lg border transition-colors", active ? "bg-white/5" : "border-[#2A2C38] hover:border-white/20")}
+                    className={cx("rounded-lg border transition-colors overflow-hidden", active ? "bg-white/5" : "border-[#2A2C38] hover:border-white/20")}
                     style={active ? { borderColor: r.color } : {}}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">{r.title}</span>
-                      <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full" style={{ color: r.color, border: `1px solid ${r.color}` }}>
-                        {r.label}
-                      </span>
-                    </div>
-                    <p className="text-xs text-[#96939F] mt-1">{r.blurb}</p>
-                  </button>
+                    <button type="button" onClick={() => toggleQ2(k)} className="w-full text-left px-4 py-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{r.title}</span>
+                        <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full" style={{ color: r.color, border: `1px solid ${r.color}` }}>
+                          {r.label}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#96939F] mt-1">{r.blurb}</p>
+                    </button>
+
+                    {active && (
+                      <div className="px-4 pb-3 pt-2 border-t" style={{ borderColor: `${r.color}33` }}>
+                        <p className="text-[11px] text-[#96939F] mb-2">
+                          ¿En qué específicamente puedes apoyar aquí? Elige una o varias.
+                        </p>
+                        <div className="space-y-1.5">
+                          {SUBTASKS[k].map((txt, idx) => {
+                            const checked = details.includes(idx);
+                            return (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => toggleSubtask(k, idx)}
+                                className={cx(
+                                  "w-full flex items-start gap-2 text-left text-xs px-2.5 py-2 rounded-md border transition-colors",
+                                  checked ? "bg-white/10 border-transparent" : "border-transparent hover:bg-white/5"
+                                )}
+                              >
+                                <span
+                                  className="mt-0.5 w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0"
+                                  style={checked ? { backgroundColor: r.color, borderColor: r.color } : { borderColor: "#5B5866" }}
+                                >
+                                  {checked && <CheckCircle2 size={11} className="text-white" />}
+                                </span>
+                                <span className="text-[#D8D5E0]">{txt}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {details.length === 0 && (
+                          <p className="text-[11px] text-[#E07A7A] mt-2">Elige al menos una opción de esta lista.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
-            <PrimaryButton onClick={finishSurvey} disabled={q2.length === 0 || saving}>
+            <PrimaryButton onClick={finishSurvey} disabled={q2.length === 0 || missingDetails || saving}>
               {saving ? <Loader2 size={16} className="animate-spin" /> : "Continuar"}
             </PrimaryButton>
           </div>
@@ -472,12 +676,18 @@ function ProfileScreen({ record, onLogout }) {
 
 /* ---------------- Admin ---------------- */
 
-function AdminPanel({ onExit }) {
+function AdminPanel({ onExit, currentUid }) {
   const [tab, setTab] = useState("solicitudes");
   const [users, setUsers] = useState([]);
+  const [adminUids, setAdminUids] = useState([]);
   const [loading, setLoading] = useState(true);
   const [links, setLinks] = useState(emptyLinks());
   const [savingLinks, setSavingLinks] = useState(false);
+
+  const [grantNick, setGrantNick] = useState("");
+  const [granting, setGranting] = useState(false);
+  const [grantError, setGrantError] = useState("");
+  const [grantMsg, setGrantMsg] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -487,6 +697,8 @@ function AdminPanel({ onExit }) {
     setUsers(recs);
     const lr = await getDoc(doc(db, "config", "rankLinks"));
     setLinks(lr.exists() ? lr.data() : emptyLinks());
+    const adminsSnap = await getDocs(collection(db, "admins"));
+    setAdminUids(adminsSnap.docs.map((d) => d.id));
     setLoading(false);
   }, []);
 
@@ -503,8 +715,50 @@ function AdminPanel({ onExit }) {
     setSavingLinks(false);
   };
 
+  const grantAdmin = async () => {
+    setGrantError("");
+    setGrantMsg("");
+    const nickLower = grantNick.trim().toLowerCase();
+    if (!nickLower) {
+      setGrantError("Escribe el nick de la persona.");
+      return;
+    }
+    setGranting(true);
+    try {
+      const nameSnap = await getDoc(doc(db, "usernames", nickLower));
+      if (!nameSnap.exists()) {
+        setGrantError("No existe ningún usuario registrado con ese nick.");
+        setGranting(false);
+        return;
+      }
+      const { uid } = nameSnap.data();
+      if (adminUids.includes(uid)) {
+        setGrantError("Esa persona ya es administrador.");
+        setGranting(false);
+        return;
+      }
+      await setDoc(doc(db, "admins", uid), { grantedAt: Date.now(), grantedBy: currentUid });
+      setGrantMsg(`Listo: "${grantNick.trim()}" ahora es administrador.`);
+      setGrantNick("");
+      await load();
+    } catch (e) {
+      setGrantError("No se pudo otorgar el acceso. Intenta de nuevo.");
+    }
+    setGranting(false);
+  };
+
+  const revokeAdmin = async (uid) => {
+    if (uid === currentUid) {
+      const sure = window.confirm("¿Seguro que quieres quitarte tu propio acceso de administrador?");
+      if (!sure) return;
+    }
+    await deleteDoc(doc(db, "admins", uid));
+    await load();
+  };
+
   const solicitudes = users.filter((u) => u.status === "submitted");
   const resueltas = users.filter((u) => u.status === "accepted" || u.status === "rejected");
+  const admins = adminUids.map((uid) => ({ uid, user: users.find((u) => u.id === uid) || null }));
 
   return (
     <Shell>
@@ -516,6 +770,9 @@ function AdminPanel({ onExit }) {
             </button>
             <button onClick={() => setTab("enlaces")} className={cx("text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "enlaces" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
               <Settings size={14} /> Enlaces por rango
+            </button>
+            <button onClick={() => setTab("admins")} className={cx("text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "admins" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
+              <Shield size={14} /> Administradores
             </button>
           </div>
           <button onClick={onExit} className="text-xs text-[#96939F] hover:text-[#F2F0EB]">Salir</button>
@@ -586,6 +843,49 @@ function AdminPanel({ onExit }) {
             </PrimaryButton>
           </div>
         )}
+
+        {!loading && tab === "admins" && (
+          <div className="space-y-5">
+            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
+              <div className="text-sm font-medium mb-1">Otorgar acceso de administrador</div>
+              <p className="text-xs text-[#96939F] mb-4">
+                Escribe el nick de un usuario ya registrado para darle acceso al panel.
+              </p>
+              <Field
+                icon={UserIcon}
+                label="Nick del usuario"
+                placeholder="ejemplo: mariposa"
+                value={grantNick}
+                onChange={(e) => setGrantNick(e.target.value)}
+                error={grantError}
+                hint={grantMsg || undefined}
+              />
+              <PrimaryButton onClick={grantAdmin} disabled={granting}>
+                {granting ? <Loader2 size={16} className="animate-spin" /> : "Otorgar admin"}
+              </PrimaryButton>
+            </div>
+
+            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
+              <div className="text-sm font-medium mb-3">Administradores actuales ({admins.length})</div>
+              <div className="space-y-2">
+                {admins.map(({ uid, user: u }) => (
+                  <div key={uid} className="flex items-center justify-between bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
+                    <div>
+                      <div>{u?.nick || "Usuario desconocido"}</div>
+                      {u?.email && <div className="text-xs text-[#5B5866]">{u.email}</div>}
+                    </div>
+                    <button
+                      onClick={() => revokeAdmin(uid)}
+                      className="flex items-center gap-1.5 text-xs text-[#E07A7A] hover:bg-[#E07A7A]/15 border border-[#E07A7A]/40 rounded-lg px-2.5 py-1.5"
+                    >
+                      <XCircle size={13} /> Quitar
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </Shell>
   );
@@ -604,6 +904,17 @@ function SolicitudCard({ user, onDecide }) {
         <div>Correo: {user.email}</div>
         <div>Experiencia previa: {user.answers?.experiencia || "—"}</div>
         <div>Se postula a: {(user.answers?.tareas || []).map((k) => RANKS[k].label).join(", ") || "—"}</div>
+        {user.answers?.tareasDetalle && Object.keys(user.answers.tareasDetalle).length > 0 && (
+          <div className="mt-1 space-y-0.5">
+            {Object.entries(user.answers.tareasDetalle).map(([k, items]) => (
+              items?.length > 0 && (
+                <div key={k}>
+                  <span style={{ color: RANKS[k]?.color }}>{RANKS[k]?.label}:</span> {items.join("; ")}
+                </div>
+              )
+            ))}
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <select value={rank} onChange={(e) => setRank(e.target.value)} className="bg-[#1D1F2A] border border-[#2A2C38] rounded-lg text-sm px-2 py-2 flex-1">
@@ -649,7 +960,28 @@ export default function App() {
       setUser(fbUser);
       if (fbUser) {
         const snap = await getDoc(doc(db, "users", fbUser.uid));
-        setRecord(snap.exists() ? snap.data() : null);
+        const data = snap.exists() ? snap.data() : null;
+        setRecord(data);
+
+        // "indrhack" es el administrador principal fijo. Si todavía no
+        // tiene el rol de admin, se lo asigna a sí mismo automáticamente
+        // al entrar (las reglas de Firestore solo permiten esto para ese
+        // nick exacto — ver firestore.rules).
+        if (data?.nick && data.nick.trim().toLowerCase() === "indrhack") {
+          try {
+            const adminSnap = await getDoc(doc(db, "admins", fbUser.uid));
+            if (!adminSnap.exists()) {
+              await setDoc(doc(db, "admins", fbUser.uid), {
+                grantedAt: Date.now(),
+                grantedBy: "bootstrap",
+              });
+            }
+          } catch (e) {
+            // Si las reglas de Firestore aún no están actualizadas en la
+            // consola, esto simplemente no hace nada por ahora; se puede
+            // volver a intentar en el siguiente inicio de sesión.
+          }
+        }
       } else {
         setRecord(null);
       }
@@ -687,7 +1019,7 @@ export default function App() {
 
   if (adminMode) {
     if (isAdmin === false) return <NoAdminAccess onExit={() => setAdminMode(false)} />;
-    if (isAdmin === true) return <AdminPanel onExit={() => setAdminMode(false)} />;
+    if (isAdmin === true) return <AdminPanel onExit={() => setAdminMode(false)} currentUid={user.uid} />;
     return (
       <Shell>
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center">

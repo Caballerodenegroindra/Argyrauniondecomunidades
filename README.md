@@ -24,18 +24,22 @@ Puedes pegar el contenido de `firestore.rules` directamente en
 CLI (`firebase deploy --only firestore:rules`) si ya tienes el proyecto
 vinculado con `firebase init`.
 
-## 3. Hacerte administrador
+## 3. El administrador principal
 
-El panel de administración no usa una contraseña fija: revisa si tu
-usuario está en la colección `admins`. Para dártelo a ti mismo:
+El nick **`indrhack`** es el administrador principal fijo de la comunidad:
+apenas esa persona se registra e inicia sesión, la app le otorga el acceso
+de administrador automáticamente (no hace falta tocar nada en la consola
+de Firebase).
 
-1. Regístrate normalmente en la app (con tu nick, contraseña, teléfono, correo).
-2. En la consola de Firebase, ve a **Authentication** y copia tu **UID**.
-3. En **Firestore Database**, crea manualmente la colección `admins` con
-   un documento cuyo **ID sea exactamente ese UID** (el contenido puede
-   quedar vacío, `{}`).
-4. Ya puedes entrar al panel desde el botón "Panel de administración" al
-   pie de la página.
+Desde el panel de administración → pestaña **"Administradores"**,
+`indrhack` (o cualquier otro administrador) puede otorgar o quitar el
+acceso de admin a cualquier otro usuario ya registrado, escribiendo su
+nick. Ya no es necesario crear documentos a mano en Firestore.
+
+**Importante:** para que esto funcione, primero debes publicar las reglas
+actualizadas de `firestore.rules` (ver paso 2). Si te registras como
+`indrhack` antes de publicar las reglas nuevas, simplemente vuelve a
+iniciar sesión después de publicarlas y el acceso se otorgará solo.
 
 ## 4. Instalar y correr en local
 

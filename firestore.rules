@@ -44,11 +44,19 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Lista de administradores. Se gestiona a mano desde la consola de
-    // Firebase (ver README) — nadie puede escribirla desde la app.
+    // Lista de administradores.
+    // - "indrhack" es el admin principal: se auto-otorga el acceso la
+    //   primera vez que inicia sesión (bootstrap), y solo puede hacerlo
+    //   para su propia cuenta.
+    // - Cualquier administrador ya existente puede otorgar o quitar el
+    //   acceso a otras personas desde el panel.
     match /admins/{uid} {
-      allow read: if isSignedIn() && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if isAdmin() || (
+        isSignedIn() && request.auth.uid == uid &&
+        get(/databases/$(database)/documents/users/$(uid)).data.nick.lower() == 'indrhack'
+      );
+      allow update, delete: if isAdmin();
     }
   }
 }
