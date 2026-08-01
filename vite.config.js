@@ -1,9 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Si despliegas en GitHub Pages en un repo que NO es "usuario.github.io",
-// descomenta la línea de "base" y pon el nombre exacto de tu repositorio.
+// base: "./" usa rutas relativas para los archivos generados (JS/CSS).
+// Así funciona sin importar el nombre exacto del repositorio de GitHub
+// ni si el usuario le cambia el nombre más adelante — evita la pantalla
+// en blanco causada por una ruta base mal escrita.
 export default defineConfig({
   plugins: [react()],
-  // base: "/nombre-de-tu-repo/",
+  base: "./",
 });
+
+

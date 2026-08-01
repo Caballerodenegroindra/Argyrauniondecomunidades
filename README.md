@@ -69,18 +69,23 @@ npm run build
 firebase deploy
 ```
 
-### Opción B — GitHub Pages
+### Opción B — GitHub Pages (ya configurada en este repo)
 
-1. En `vite.config.js`, descomenta la línea `base:` y pon el nombre exacto
-   de tu repositorio, por ejemplo `base: "/argyra-web/"`.
-2. Instala el paquete de despliegue y publica la carpeta `dist`:
-   ```bash
-   npm install -D gh-pages
-   npm run build
-   npx gh-pages -d dist
-   ```
-3. En GitHub, ve a **Settings → Pages** y confirma que la fuente sea la
-   rama `gh-pages`.
+Este proyecto ya incluye `.github/workflows/deploy.yml`, que compila y
+publica el sitio automáticamente cada vez que haces `git push` a `main`.
+No necesitas instalar nada extra ni correr comandos de despliegue a mano.
+Solo tienes que activarlo una vez en la configuración del repositorio:
+
+1. En GitHub, ve a **Settings → Pages**.
+2. En **Build and deployment → Source**, elige **GitHub Actions**
+   (NO "Deploy from a branch" — si queda en esa opción, el sitio no se
+   publica y la página aparece en blanco o da 404).
+3. Haz `git push` a `main` (o entra a la pestaña **Actions** y corre el
+   workflow "Deploy to GitHub Pages" manualmente).
+4. En unos 1-2 minutos, la URL aparecerá arriba de **Settings → Pages**.
+
+`vite.config.js` usa `base: "./"` (ruta relativa), así que funciona sin
+importar el nombre exacto del repositorio.
 
 ## Notas importantes
 
