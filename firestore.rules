@@ -11,6 +11,14 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
+    // Solo el administrador principal fijo "indrhack" (no los demás admins
+    // que él otorgue) puede administrar la lista de Líderes / Alto Consejo.
+    function isSuperAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.nick.lower() == 'indrhack';
+    }
+
     // Mapeo nick -> {uid, email}. Necesita lectura pública porque el login
     // por nick busca aquí ANTES de que la persona esté autenticada.
     // Solo expone el correo asociado a un nick, nunca contraseñas
@@ -42,6 +50,40 @@ service cloud.firestore {
     match /config/rankLinks {
       allow read: if isSignedIn();
       allow write: if isAdmin();
+    }
+
+    // Directorio público de miembros: solo nick, rango y estado (sin
+    // teléfono ni correo). Cualquier persona con cuenta puede ver la lista
+    // completa (para la sección "Comunidad"); cada quien crea su propia
+    // entrada al registrarse y solo un admin puede tocarla una vez resuelta.
+    match /directory/{uid} {
+      allow read: if isSignedIn();
+      // El dueño crea su propia entrada al registrarse; un admin también
+      // puede crearla/actualizarla (por ejemplo, para "poner al día" a
+      // cuentas que ya existían antes de esta sección).
+      allow create: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow update: if isAdmin() || (
+        request.auth.uid == uid &&
+        resource.data.status != "accepted" &&
+        resource.data.status != "rejected"
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Noticias / información de la comunidad que se ve al iniciar sesión.
+    // Cualquier admin (indrhack u otro admin otorgado) puede publicar.
+    match /news/{id} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Cúpula y Alto Consejo. Cada entrada guarda una copia del nombre y
+    // teléfono del usuario líder para poder mostrarlo y contactarlo por
+    // WhatsApp. Solo "indrhack" (isSuperAdmin) puede agregar o quitar
+    // líderes; cualquier persona con cuenta puede ver la lista.
+    match /leaders/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdmin();
     }
 
     // Lista de administradores.
