@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback, Suspense, lazy } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Shield, Users, Sparkles, Lock, Mail, Phone, User as UserIcon,
-  CheckCircle2, XCircle, ChevronRight, LogOut, Settings, ClipboardList,
+  CheckCircle2, XCircle, ChevronRight, ChevronDown, LogOut, Settings, ClipboardList,
   ExternalLink, AlertCircle, Loader2, Home, Newspaper, Crown,
-  MessageCircle, Plus, Trash2, ArrowLeft, X
+  MessageCircle, Plus, Trash2, ArrowLeft, X, Building2, FlaskConical,
+  ShieldCheck, Globe2, Smile, Megaphone, Stamp, Send, Landmark, UserPlus,
 } from "lucide-react";
 import {
   createUserWithEmailAndPassword,
@@ -13,108 +14,86 @@ import {
 } from "firebase/auth";
 import {
   doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs,
-  query, orderBy, onSnapshot,
+  query, orderBy, onSnapshot, addDoc, where,
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
 import argyraLogo from "./assets/argyra-logo.png";
 
-/* ---------------------------------------------------------
-   Tokens de diseño (mismos que la referencia de marca Argyra)
---------------------------------------------------------- */
+/* ===========================================================
+   MODELO DE DATOS (resumen)
+   -----------------------------------------------------------
+   communities/{id}
+     name, kind: 'comunidad' | 'independiente'
+     subcommunities: string[]
+     leaderUid, leaderName, leaderPhone
+     ambassadorMainUid, ambassadorMainName
+     ambassadorAltUid, ambassadorAltName
+     sealDate, status: 'activa' | 'expulsada', notes, createdAt
 
-const RANKS = {
-  lider: {
-    key: "lider",
-    label: "Líder",
-    title: "Liderazgo y coordinación general",
-    color: "#8E5FD6",
-    blurb: "Miembros con rol de liderazgo dentro de la comunidad: coordinan y guían más allá de sus tareas diarias, por debajo de la Cúpula y Alto Consejo.",
+   users/{uid}  (perfil privado)
+     nick, phone, email, motivation
+     status: 'survey-pending'|'terms-pending'|'submitted'|'accepted'|'rejected'
+     affiliation: 'community' | 'new-community' | 'team'
+     communityId: string|null
+     pendingCommunityName, pendingCommunityKind  (si affiliation === 'new-community')
+     role: 'nuevo'|'miembro'|'coordinador'|'lider'
+     branches: string[]  (solo relevante si role === 'coordinador')
+     sello: { active: bool, date: string|null }
+     createdAt, updatedAt
+
+   directory/{uid}  (espejo público reducido, solo para miembros aceptados)
+     nick, role, branches, communityId, sello:{active}, status
+
+   announcements/{id}  (Directorio Central)
+     title, body, scope: 'global'|'community', communityId,
+     authorUid, authorName, createdAt
+
+   communities/{id}/embassy/{id}  (Embajada — espacio privado de la comunidad)
+     authorUid, authorName, body, createdAt
+
+   passRequests/{id}  (Sistema de pase — validar liderazgo antes de Coordinador)
+     uid, name, branchRequested, motivation,
+     status: 'pending'|'approved'|'rejected', reviewedBy, createdAt
+=========================================================== */
+
+const BRANCHES = {
+  laboratorio: {
+    key: "laboratorio", label: "Laboratorio", icon: FlaskConical, color: "#6C6CF0",
+    blurb: "Investigación, herramientas y proyectos nuevos de la comunidad.",
   },
-  kangu: {
-    key: "kangu",
-    label: "Kangu",
-    title: "Moderación, Control y Seguridad",
-    color: "#6C6CF0",
-    blurb: "Administradores y moderadores que mantienen los grupos limpios, ordenados y protegidos.",
+  guardia: {
+    key: "guardia", label: "Guardia y Expansión", icon: ShieldCheck, color: "#8C2F39",
+    blurb: "Seguridad, moderación y crecimiento de comunidades afiliadas.",
   },
-  domeisha: {
-    key: "domeisha",
-    label: "Domeisha",
-    title: "Especialistas VIP",
-    color: "#C9A036",
-    blurb: "Miembros con habilidades especiales en programación, diseño y organización de herramientas.",
+  relaciones: {
+    key: "relaciones", label: "Relaciones Externas", icon: Globe2, color: "#C9A036",
+    blurb: "Embajadas, alianzas y contacto entre comunidades.",
   },
-  taicho: {
-    key: "taicho",
-    label: "Taicho",
-    title: "Base de la comunidad — Veteranos",
-    color: "#8C2F39",
-    blurb: "El corazón de la comunidad: quienes participan en las conversaciones cotidianas.",
+  casual: {
+    key: "casual", label: "Comunidad Casual", icon: Smile, color: "#4E9A6B",
+    blurb: "Convivencia diaria, eventos y ambiente de la comunidad.",
   },
-  sinchan: {
-    key: "sinchan",
-    label: "Sin Chan",
-    title: "Base de la comunidad — Novatos",
-    color: "#4E9A6B",
-    blurb: "Los recién llegados: nuevos en la comunidad.",
+  publicidad: {
+    key: "publicidad", label: "Publicidad", icon: Megaphone, color: "#B36BD4",
+    blurb: "Difusión y promoción de Argyra hacia afuera.",
   },
 };
+const BRANCH_ORDER = ["laboratorio", "guardia", "relaciones", "casual", "publicidad"];
 
-// RANK_ORDER: rangos "autoasignables" en la encuesta de registro (tienen
-// tareas específicas en SUBTASKS). "Líder" NO está aquí a propósito: es un
-// título honorífico que solo un admin otorga, nadie se lo autoasigna.
-const RANK_ORDER = ["kangu", "domeisha", "taicho", "sinchan"];
-
-// TITLE_ORDER: todos los títulos que un admin puede otorgar a un miembro
-// (incluye "Líder"). Se usa para el selector de rangos en Admin, el orden
-// de la lista de Comunidad y la pantalla "Líderes y rangos".
-const TITLE_ORDER = ["lider", ...RANK_ORDER];
-
-// Tareas específicas de cada rango: al elegir un rango en la encuesta,
-// la persona debe marcar en cuál(es) de estas puede apoyar puntualmente.
-const SUBTASKS = {
-  kangu: [
-    "Buscar alianzas con otros grupos para que se unan a la comunidad",
-    "Hacer cumplir las reglas en cada grupo y borrar spam",
-    "Calmar discusiones",
-    "Apoyar a miembros en lo que necesiten",
-    "Detectar usuarios que generan spam o hackers",
-  ],
-  domeisha: [
-    "Programación e ingeniería",
-    "Crear, actualizar y reparar las herramientas de la comunidad",
-    "Planear nuevas herramientas y funciones",
-  ],
-  taicho: [
-    "Ayudar a los nuevos miembros a acoplarse, guiándolos",
-    "Informar a los administradores nuevos cómo funciona la comunidad",
-    "Aportar conocimiento",
-    "Apoyar a todos los admin líderes",
-  ],
-  sinchan: [
-    "Quiero aprender",
-    "Quiero ayudar",
-    "Quiero apoyar",
-  ],
+const ROLES = {
+  lider: { key: "lider", label: "Líder", color: "#C9A036", blurb: "Autoridad máxima de todo el proyecto Argyra." },
+  coordinador: { key: "coordinador", label: "Coordinador", color: "#6C6CF0", blurb: "Coordina una o más ramas funcionales de Argyra." },
+  miembro: { key: "miembro", label: "Miembro", color: "#4E9A6B", blurb: "Participa activamente en la comunidad." },
+  nuevo: { key: "nuevo", label: "Nuevo", color: "#96939F", blurb: "Recién llegado a Argyra." },
 };
+const ROLE_ORDER = ["lider", "coordinador", "miembro", "nuevo"];
 
-function cx(...a) {
-  return a.filter(Boolean).join(" ");
-}
+function cx(...a) { return a.filter(Boolean).join(" "); }
 
 /* ---------------- Validación de nombre y teléfono ---------------- */
-
-// Solo letras (incluye acentos y ñ), sin espacios, números ni símbolos.
 const NAME_REGEX = /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+$/;
-function isValidName(str) {
-  return NAME_REGEX.test(str);
-}
-// Filtra en tiempo real cualquier carácter que no sea una letra.
-function sanitizeName(str) {
-  return str.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, "");
-}
-
-// Deja pasar solo dígitos y un único "+" al inicio (número "todo junto").
+function isValidName(str) { return NAME_REGEX.test(str); }
+function sanitizeName(str) { return str.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, ""); }
 function sanitizePhone(str) {
   let v = str.replace(/[^0-9+]/g, "");
   const hasPlus = v.startsWith("+");
@@ -122,8 +101,6 @@ function sanitizePhone(str) {
   return hasPlus ? "+" + v : v;
 }
 
-// Códigos de discado internacional (E.164) realmente asignados por la UIT.
-// Se usa para detectar números "inventados" cuyo código de país no existe.
 const COUNTRY_CODES = [
   "1","7","20","27","30","31","32","33","34","36","39","40","41","43","44","45","46","47","48","49",
   "51","52","53","54","55","56","57","58","60","61","62","63","64","65","66","81","82","84","86","90","91","92","93","94","95","98",
@@ -141,7 +118,7 @@ const COUNTRY_CODES = [
   "880","886",
   "960","961","962","963","964","965","966","967","968","970","971","972","973","974","975","976","977",
   "992","993","994","995","996","998",
-].sort((a, b) => b.length - a.length); // probar primero los códigos más largos
+].sort((a, b) => b.length - a.length);
 
 function validatePhone(raw) {
   const val = (raw || "").trim();
@@ -163,57 +140,22 @@ function validatePhone(raw) {
   return { valid: true, message: "" };
 }
 
-// Convierte un teléfono guardado (ej: "+51999999999") en un enlace wa.me
-// Devuelve siempre un arreglo de rangos, incluso para cuentas antiguas que
-// todavía solo tienen el campo singular "rank" en vez de "ranks".
-function userRanks(u) {
-  if (!u) return [];
-  if (Array.isArray(u.ranks) && u.ranks.length) return u.ranks;
-  if (u.rank) return [u.rank];
-  return [];
-}
-
-// Selector de uno o más rangos/títulos (checkboxes).
-function RankPicker({ value, onChange }) {
-  const toggle = (k) => {
-    onChange(value.includes(k) ? value.filter((x) => x !== k) : [...value, k]);
-  };
-  return (
-    <div className="flex flex-wrap gap-2">
-      {TITLE_ORDER.map((k) => {
-        const active = value.includes(k);
-        return (
-          <button
-            type="button"
-            key={k}
-            onClick={() => toggle(k)}
-            className="text-xs px-2.5 py-1.5 rounded-full border transition-colors"
-            style={active
-              ? { color: RANKS[k].color, borderColor: RANKS[k].color, background: `${RANKS[k].color}1A` }
-              : { color: "#5B5866", borderColor: "#2A2C38" }}
-          >
-            {RANKS[k].label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function waLink(phone) {
   const digits = (phone || "").replace(/[^0-9]/g, "");
   return digits ? `https://wa.me/${digits}` : null;
 }
 
-// Mantiene sincronizado el "directorio público" (users/{uid} -> directory/{uid})
-// con solo la info que es segura mostrar a cualquier miembro logueado
-// (nick, rango y estado), sin exponer teléfono ni correo.
-async function syncDirectory(uid, data) {
+function formatDate(v) {
+  if (!v) return "—";
   try {
-    await setDoc(doc(db, "directory", uid), data, { merge: true });
-  } catch (e) {
-    // Si las reglas todavía no están desplegadas, no rompemos el flujo principal.
-  }
+    const d = typeof v === "number" ? new Date(v) : new Date(v);
+    if (isNaN(d.getTime())) return String(v);
+    return d.toLocaleDateString("es-ES", { year: "numeric", month: "short", day: "numeric" });
+  } catch { return String(v); }
+}
+
+async function syncDirectory(uid, data) {
+  try { await setDoc(doc(db, "directory", uid), data, { merge: true }); } catch (e) {}
 }
 
 function firebaseErrorToMessage(err) {
@@ -221,8 +163,7 @@ function firebaseErrorToMessage(err) {
   if (code.includes("email-already-in-use")) return "Ese correo ya tiene una cuenta.";
   if (code.includes("weak-password")) return "La contraseña debe tener al menos 6 caracteres.";
   if (code.includes("invalid-email")) return "Correo electrónico inválido.";
-  if (code.includes("wrong-password") || code.includes("invalid-credential"))
-    return "Contraseña incorrecta.";
+  if (code.includes("wrong-password") || code.includes("invalid-credential")) return "Contraseña incorrecta.";
   if (code.includes("user-not-found")) return "No existe una cuenta con ese correo.";
   if (code.includes("too-many-requests")) return "Demasiados intentos. Espera un momento.";
   return "Ocurrió un error. Intenta de nuevo.";
@@ -255,6 +196,27 @@ function Field({ icon: Icon, label, hint, error, ...props }) {
   );
 }
 
+function TextArea({ label, hint, error, ...props }) {
+  return (
+    <label className="block mb-4">
+      <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">{label}</span>
+      <textarea
+        {...props}
+        rows={props.rows || 3}
+        className={cx(
+          "w-full bg-[#1D1F2A] border rounded-lg px-3 py-2.5 outline-none text-[#F2F0EB] placeholder:text-[#5B5866] text-sm focus:border-[#6C6CF0] transition-colors resize-none",
+          error ? "border-[#E07A7A]" : "border-[#2A2C38]"
+        )}
+      />
+      {error ? (
+        <span className="block text-[11px] text-[#E07A7A] mt-1">{error}</span>
+      ) : hint ? (
+        <span className="block text-[11px] text-[#5B5866] mt-1">{hint}</span>
+      ) : null}
+    </label>
+  );
+}
+
 function PrimaryButton({ children, className, ...props }) {
   return (
     <button
@@ -269,7 +231,21 @@ function PrimaryButton({ children, className, ...props }) {
   );
 }
 
-function Shell({ children }) {
+function GhostButton({ children, className, ...props }) {
+  return (
+    <button
+      {...props}
+      className={cx(
+        "w-full flex items-center justify-center gap-2 border border-[#2A2C38] hover:border-[#6C6CF0] disabled:opacity-40 disabled:cursor-not-allowed text-[#F2F0EB] font-medium text-sm rounded-lg px-4 py-2.5 transition-colors",
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Shell({ children, wide }) {
   return (
     <div className="min-h-screen w-full bg-[#0C0D12] text-[#F2F0EB] relative overflow-hidden">
       <div className="pointer-events-none absolute -top-24 -right-24 w-[420px] h-[420px] rounded-full border border-[#2A2C38] opacity-40" />
@@ -287,7 +263,7 @@ function Shell({ children }) {
             Unión de comunidades
           </div>
         </div>
-        <div className="w-full max-w-md">{children}</div>
+        <div className={cx("w-full", wide ? "max-w-lg" : "max-w-md")}>{children}</div>
       </div>
     </div>
   );
@@ -305,7 +281,7 @@ function ProgressDots({ step, total }) {
 
 function StatusBadge({ status }) {
   const map = {
-    "survey-pending": { text: "Encuesta pendiente", color: "#96939F" },
+    "survey-pending": { text: "Formulario pendiente", color: "#96939F" },
     "terms-pending": { text: "Falta enviar solicitud", color: "#96939F" },
     submitted: { text: "En revisión", color: "#C9A036" },
     accepted: { text: "Aceptada", color: "#4E9A6B" },
@@ -316,6 +292,116 @@ function StatusBadge({ status }) {
     <span className="text-xs px-2.5 py-1 rounded-full border" style={{ color: s.color, borderColor: s.color }}>
       {s.text}
     </span>
+  );
+}
+
+function RoleBadge({ role }) {
+  const r = ROLES[role] || ROLES.nuevo;
+  return (
+    <span className="text-xs px-2.5 py-1 rounded-full border" style={{ color: r.color, borderColor: r.color, background: `${r.color}1A` }}>
+      {r.label}
+    </span>
+  );
+}
+
+function BranchChip({ branchKey, size = "xs" }) {
+  const b = BRANCHES[branchKey];
+  if (!b) return null;
+  const Icon = b.icon;
+  return (
+    <span
+      className={cx("inline-flex items-center gap-1 px-2 py-1 rounded-full border", size === "xs" ? "text-[11px]" : "text-xs")}
+      style={{ color: b.color, borderColor: b.color, background: `${b.color}1A` }}
+    >
+      <Icon size={12} /> {b.label}
+    </span>
+  );
+}
+
+function SealBadge({ sello }) {
+  if (!sello?.active) return null;
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-full border" style={{ color: "#C9A036", borderColor: "#C9A036", background: "#C9A0361A" }}>
+      <Stamp size={12} /> Sello Argyra
+      {sello.date ? <span className="text-[#96939F]">· {formatDate(sello.date)}</span> : null}
+    </span>
+  );
+}
+
+function StatusPill({ status }) {
+  const active = status === "activa";
+  return (
+    <span
+      className="text-[11px] px-2 py-1 rounded-full border"
+      style={active ? { color: "#4E9A6B", borderColor: "#4E9A6B", background: "#4E9A6B1A" } : { color: "#E07A7A", borderColor: "#E07A7A", background: "#E07A7A1A" }}
+    >
+      {active ? "Activa" : "Expulsada"}
+    </span>
+  );
+}
+
+function SectionCard({ title, icon: Icon, children, right }) {
+  return (
+    <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-4 mb-4">
+      {title && (
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-[#F2F0EB]">
+            {Icon && <Icon size={16} className="text-[#6C6CF0]" />}
+            {title}
+          </div>
+          {right}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return <div className="text-sm text-[#5B5866] text-center py-8">{text}</div>;
+}
+
+function TopBar({ title, onBack, right }) {
+  return (
+    <div className="flex items-center gap-3 mb-5">
+      {onBack && (
+        <button onClick={onBack} className="text-[#96939F] hover:text-[#F2F0EB]">
+          <ArrowLeft size={18} />
+        </button>
+      )}
+      <div className="text-lg font-semibold flex-1">{title}</div>
+      {right}
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab, isAdmin }) {
+  const items = [
+    { key: "home", label: "Directorio", icon: Newspaper },
+    { key: "communities", label: "Comunidades", icon: Building2 },
+    { key: "team", label: "Equipo", icon: Users },
+    { key: "leaders", label: "Líderes", icon: Crown },
+    { key: "profile", label: "Perfil", icon: UserIcon },
+  ];
+  if (isAdmin) items.push({ key: "admin", label: "Admin", icon: Shield });
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-20 bg-[#12131A]/95 backdrop-blur border-t border-[#2A2C38]">
+      <div className="max-w-lg mx-auto flex overflow-x-auto">
+        {items.map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={cx(
+              "flex-1 min-w-[64px] flex flex-col items-center gap-1 py-2.5 text-[10px] uppercase tracking-wide transition-colors",
+              tab === key ? "text-[#6C6CF0]" : "text-[#5B5866] hover:text-[#96939F]"
+            )}
+          >
+            <Icon size={18} />
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -332,80 +418,54 @@ function AuthScreen() {
 
   const handleNickChange = (e) => {
     const v = e.target.value;
-    // En login dejamos escribir libre (por si el nick ya existente tuviera
-    // formato antiguo); en registro forzamos solo letras desde que escribe.
     setNick(mode === "register" ? sanitizeName(v) : v);
   };
-
-  const handlePhoneChange = (e) => {
-    setPhone(sanitizePhone(e.target.value));
-  };
+  const handlePhoneChange = (e) => setPhone(sanitizePhone(e.target.value));
 
   const nickError = mode === "register" && nick.length > 0 && !isValidName(nick)
-    ? "Solo letras, sin espacios ni símbolos."
-    : "";
+    ? "Solo letras, sin espacios ni símbolos." : "";
   const phoneCheck = mode === "register" && phone.length > 0 ? validatePhone(phone) : null;
   const phoneError = phoneCheck && !phoneCheck.valid ? phoneCheck.message : "";
 
   const submit = async () => {
     setError("");
-    if (!nick.trim() || !password) {
-      setError("Completa nick y contraseña.");
-      return;
-    }
+    if (!nick.trim() || !password) { setError("Completa nick y contraseña."); return; }
     setBusy(true);
     const nickLower = nick.trim().toLowerCase();
     try {
       if (mode === "register") {
-        if (!phone.trim() || !email.trim()) {
-          setError("Completa tu número y tu correo electrónico.");
-          setBusy(false);
-          return;
-        }
-        if (!isValidName(nick.trim())) {
-          setError("El nombre solo puede tener letras, sin espacios ni símbolos.");
-          setBusy(false);
-          return;
-        }
+        if (!phone.trim() || !email.trim()) { setError("Completa tu número y tu correo electrónico."); setBusy(false); return; }
+        if (!isValidName(nick.trim())) { setError("El nombre solo puede tener letras, sin espacios ni símbolos."); setBusy(false); return; }
         const phoneResult = validatePhone(phone.trim());
-        if (!phoneResult.valid) {
-          setError(phoneResult.message);
-          setBusy(false);
-          return;
-        }
+        if (!phoneResult.valid) { setError(phoneResult.message); setBusy(false); return; }
         const nameRef = doc(db, "usernames", nickLower);
         const nameSnap = await getDoc(nameRef);
-        if (nameSnap.exists()) {
-          setError("Ese nick ya está registrado. Prueba iniciar sesión.");
-          setBusy(false);
-          return;
-        }
+        if (nameSnap.exists()) { setError("Ese nick ya está registrado. Prueba iniciar sesión."); setBusy(false); return; }
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
         await setDoc(doc(db, "users", cred.user.uid), {
           nick: nick.trim(),
           phone: phone.trim(),
           email: email.trim(),
           status: "survey-pending",
-          answers: {},
-          ranks: [],
+          affiliation: null,
+          communityId: null,
+          pendingCommunityName: "",
+          pendingCommunityKind: "",
+          motivation: "",
+          role: "nuevo",
+          branches: [],
+          sello: { active: false, date: null },
           createdAt: Date.now(),
         });
         await setDoc(nameRef, { uid: cred.user.uid, email: email.trim() });
-        await syncDirectory(cred.user.uid, { nick: nick.trim(), ranks: [], status: "survey-pending" });
-        // onAuthStateChanged en el componente raíz recoge la sesión desde aquí.
+        await syncDirectory(cred.user.uid, { nick: nick.trim(), role: "nuevo", branches: [], communityId: null, status: "survey-pending", sello: { active: false } });
       } else {
         const nameSnap = await getDoc(doc(db, "usernames", nickLower));
-        if (!nameSnap.exists()) {
-          setError("No existe una cuenta con ese nick.");
-          setBusy(false);
-          return;
-        }
+        if (!nameSnap.exists()) { setError("No existe una cuenta con ese nick."); setBusy(false); return; }
         const { email: loginEmail } = nameSnap.data();
         await signInWithEmailAndPassword(auth, loginEmail, password);
       }
-    } catch (e) {
-      setError(firebaseErrorToMessage(e));
-    }
+    } catch (e) { setError(firebaseErrorToMessage(e)); }
     setBusy(false);
   };
 
@@ -413,55 +473,26 @@ function AuthScreen() {
     <Shell>
       <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
         <div className="flex mb-6 bg-[#1D1F2A] rounded-lg p-1">
-          <button
-            onClick={() => setMode("login")}
-            className={cx("flex-1 text-sm py-2 rounded-md transition-colors", mode === "login" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}
-          >
-            Iniciar sesión
-          </button>
-          <button
-            onClick={() => setMode("register")}
-            className={cx("flex-1 text-sm py-2 rounded-md transition-colors", mode === "register" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}
-          >
-            Registrarse
-          </button>
+          <button onClick={() => setMode("login")} className={cx("flex-1 text-sm py-2 rounded-md transition-colors", mode === "login" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>Iniciar sesión</button>
+          <button onClick={() => setMode("register")} className={cx("flex-1 text-sm py-2 rounded-md transition-colors", mode === "register" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>Registrarse</button>
         </div>
 
-        <Field
-          icon={UserIcon}
-          label="Nick o nombre"
-          placeholder="TuNombre"
-          value={nick}
-          onChange={handleNickChange}
-          error={nickError}
-          hint={mode === "register" && !nickError ? "Solo letras, sin espacios ni símbolos." : undefined}
-        />
+        <Field icon={UserIcon} label="Nick o nombre" placeholder="TuNombre" value={nick} onChange={handleNickChange} error={nickError}
+          hint={mode === "register" && !nickError ? "Solo letras, sin espacios ni símbolos." : undefined} />
         <Field icon={Lock} label="Contraseña" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
         {mode === "register" && (
           <>
-            <Field
-              icon={Phone}
-              label="Número de teléfono (para el grupo)"
-              placeholder="+51999999999"
-              inputMode="tel"
-              value={phone}
-              onChange={handlePhoneChange}
-              error={phoneError}
-              hint={!phoneError ? "Todo junto, con código de país real (ej: +51...)." : undefined}
-            />
+            <Field icon={Phone} label="Número de teléfono" placeholder="+51999999999" inputMode="tel" value={phone} onChange={handlePhoneChange} error={phoneError}
+              hint={!phoneError ? "Todo junto, con código de país real (ej: +51...)." : undefined} />
             <Field icon={Mail} label="Correo electrónico (para recuperar tu cuenta)" type="email" placeholder="tucorreo@ejemplo.com" value={email} onChange={(e) => setEmail(e.target.value)} />
           </>
         )}
 
-        {error && (
-          <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-4">
-            <AlertCircle size={14} /> {error}
-          </div>
-        )}
+        {error && <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-4"><AlertCircle size={14} /> {error}</div>}
 
         <PrimaryButton onClick={submit} disabled={busy || (mode === "register" && (!!nickError || !!phoneError))}>
           {busy ? <Loader2 size={16} className="animate-spin" /> : null}
-          {mode === "register" ? "Comenzar la encuesta" : "Ingresar"}
+          {mode === "register" ? "Comenzar el ingreso" : "Ingresar"}
           {!busy && <ChevronRight size={16} />}
         </PrimaryButton>
       </div>
@@ -469,1533 +500,1147 @@ function AuthScreen() {
   );
 }
 
-/* ---------------- Survey ---------------- */
+/* ---------------- Ingreso: elegir afiliación (reemplaza la encuesta de rangos) ---------------- */
 
-function SurveyScreen({ uid, onDone }) {
+function IngresoScreen({ uid, onDone }) {
   const [step, setStep] = useState(0);
-  const [q1, setQ1] = useState(null);
-  const [q2, setQ2] = useState([]);
-  const [q2Details, setQ2Details] = useState({}); // { [rankKey]: [subtaskIndex, ...] }
-  const [saving, setSaving] = useState(false);
+  const [affiliation, setAffiliation] = useState(""); // 'community' | 'new-community' | 'team'
+  const [communities, setCommunities] = useState([]);
+  const [communityId, setCommunityId] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newKind, setNewKind] = useState("comunidad"); // 'comunidad' | 'independiente'
+  const [motivation, setMotivation] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const toggleQ2 = (key) => {
-    setQ2((prev) => {
-      if (prev.includes(key)) {
-        setQ2Details((d) => {
-          const next = { ...d };
-          delete next[key];
-          return next;
-        });
-        return prev.filter((k) => k !== key);
-      }
-      if (prev.length >= 3) return prev;
-      return [...prev, key];
-    });
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDocs(query(collection(db, "communities"), orderBy("name")));
+        setCommunities(snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((c) => c.status !== "expulsada"));
+      } catch (e) {}
+    })();
+  }, []);
+
+  const next = () => {
+    setError("");
+    if (step === 0 && !affiliation) { setError("Elige una opción para continuar."); return; }
+    if (step === 1) {
+      if (affiliation === "community" && !communityId) { setError("Elige la comunidad o grupo al que perteneces."); return; }
+      if (affiliation === "new-community" && !newName.trim()) { setError("Escribe el nombre de tu comunidad o grupo."); return; }
+    }
+    setStep((s) => s + 1);
+  };
+  const back = () => { setError(""); setStep((s) => Math.max(0, s - 1)); };
+
+  const submit = async () => {
+    setError("");
+    if (!motivation.trim()) { setError("Cuéntanos brevemente tu motivación."); return; }
+    setBusy(true);
+    try {
+      const payload = {
+        affiliation,
+        communityId: affiliation === "community" ? communityId : null,
+        pendingCommunityName: affiliation === "new-community" ? newName.trim() : "",
+        pendingCommunityKind: affiliation === "new-community" ? newKind : "",
+        motivation: motivation.trim(),
+        status: "terms-pending",
+      };
+      await updateDoc(doc(db, "users", uid), payload);
+      await syncDirectory(uid, { status: "terms-pending" });
+      onDone();
+    } catch (e) { setError(firebaseErrorToMessage(e)); }
+    setBusy(false);
   };
 
-  const toggleSubtask = (rankKey, idx) => {
-    setQ2Details((prev) => {
-      const cur = prev[rankKey] || [];
-      const next = cur.includes(idx) ? cur.filter((i) => i !== idx) : [...cur, idx];
-      return { ...prev, [rankKey]: next };
-    });
-  };
-
-  // Cada rango elegido necesita al menos una tarea específica marcada.
-  const missingDetails = q2.some((k) => !(q2Details[k] && q2Details[k].length > 0));
-
-  const finishSurvey = async () => {
-    setSaving(true);
-    const tareasDetalle = {};
-    q2.forEach((k) => {
-      tareasDetalle[k] = (q2Details[k] || []).map((idx) => SUBTASKS[k][idx]);
-    });
-    await updateDoc(doc(db, "users", uid), {
-      answers: { experiencia: q1, tareas: q2, tareasDetalle },
-      status: "terms-pending",
-    });
-    await syncDirectory(uid, { status: "terms-pending" });
-    setSaving(false);
-    onDone();
-  };
+  const OPTIONS = [
+    { key: "community", icon: Building2, title: "Ya soy parte de una comunidad o grupo afiliado", desc: "Te vinculamos a una comunidad ya registrada en Argyra." },
+    { key: "new-community", icon: UserPlus, title: "Quiero afiliar mi comunidad o grupo a Argyra", desc: "Tu comunidad (o tu grupo independiente) entra por primera vez." },
+    { key: "team", icon: Shield, title: "Quiero unirme directo al equipo de Argyra", desc: "Sin comunidad detrás: apoyas directo en una de las ramas." },
+  ];
 
   return (
     <Shell>
       <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
-        <ProgressDots step={step} total={2} />
+        <ProgressDots step={step} total={3} />
 
         {step === 0 && (
-          <div>
-            <h2 className="text-lg font-semibold mb-1">¿Tienes experiencia en comunidades de apoyo?</h2>
-            <p className="text-sm text-[#96939F] mb-5">Elige una opción para continuar.</p>
-            <div className="space-y-2">
-              {["Sí", "No", "Quizás"].map((opt) => (
-                <button
-                  key={opt}
-                  onClick={() => { setQ1(opt); setStep(1); }}
-                  className={cx(
-                    "w-full text-left px-4 py-3 rounded-lg border transition-colors text-sm",
-                    q1 === opt ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38] hover:border-[#6C6CF0]/60"
-                  )}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {step === 1 && (
-          <div>
-            <h2 className="text-lg font-semibold mb-1">¿Qué tarea te ves capaz de ejercer en la comunidad?</h2>
-            <p className="text-sm text-[#96939F] mb-5">Elige entre 1 y 3 opciones ({q2.length}/3 seleccionadas).</p>
-            <div className="space-y-2 mb-6">
-              {RANK_ORDER.map((k) => {
-                const r = RANKS[k];
-                const active = q2.includes(k);
-                const details = q2Details[k] || [];
+          <>
+            <div className="text-sm text-[#96939F] mb-4">¿Cómo te unes a Argyra?</div>
+            <div className="space-y-2 mb-2">
+              {OPTIONS.map((o) => {
+                const Icon = o.icon;
+                const active = affiliation === o.key;
                 return (
-                  <div
-                    key={k}
-                    className={cx("rounded-lg border transition-colors overflow-hidden", active ? "bg-white/5" : "border-[#2A2C38] hover:border-white/20")}
-                    style={active ? { borderColor: r.color } : {}}
+                  <button
+                    key={o.key}
+                    onClick={() => setAffiliation(o.key)}
+                    className={cx("w-full text-left flex items-start gap-3 rounded-lg border px-3 py-3 transition-colors",
+                      active ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38] hover:border-[#5B5866]")}
                   >
-                    <button type="button" onClick={() => toggleQ2(k)} className="w-full text-left px-4 py-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">{r.title}</span>
-                        <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full" style={{ color: r.color, border: `1px solid ${r.color}` }}>
-                          {r.label}
-                        </span>
-                      </div>
-                      <p className="text-xs text-[#96939F] mt-1">{r.blurb}</p>
-                    </button>
-
-                    {active && (
-                      <div className="px-4 pb-3 pt-2 border-t" style={{ borderColor: `${r.color}33` }}>
-                        <p className="text-[11px] text-[#96939F] mb-2">
-                          ¿En qué específicamente puedes apoyar aquí? Elige una o varias.
-                        </p>
-                        <div className="space-y-1.5">
-                          {SUBTASKS[k].map((txt, idx) => {
-                            const checked = details.includes(idx);
-                            return (
-                              <button
-                                key={idx}
-                                type="button"
-                                onClick={() => toggleSubtask(k, idx)}
-                                className={cx(
-                                  "w-full flex items-start gap-2 text-left text-xs px-2.5 py-2 rounded-md border transition-colors",
-                                  checked ? "bg-white/10 border-transparent" : "border-transparent hover:bg-white/5"
-                                )}
-                              >
-                                <span
-                                  className="mt-0.5 w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0"
-                                  style={checked ? { backgroundColor: r.color, borderColor: r.color } : { borderColor: "#5B5866" }}
-                                >
-                                  {checked && <CheckCircle2 size={11} className="text-white" />}
-                                </span>
-                                <span className="text-[#D8D5E0]">{txt}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                        {details.length === 0 && (
-                          <p className="text-[11px] text-[#E07A7A] mt-2">Elige al menos una opción de esta lista.</p>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                    <Icon size={18} className={active ? "text-[#6C6CF0]" : "text-[#96939F]"} />
+                    <div>
+                      <div className="text-sm font-medium">{o.title}</div>
+                      <div className="text-xs text-[#96939F] mt-0.5">{o.desc}</div>
+                    </div>
+                  </button>
                 );
               })}
             </div>
-            <PrimaryButton onClick={finishSurvey} disabled={q2.length === 0 || missingDetails || saving}>
-              {saving ? <Loader2 size={16} className="animate-spin" /> : "Continuar"}
-            </PrimaryButton>
-          </div>
+          </>
         )}
+
+        {step === 1 && affiliation === "community" && (
+          <>
+            <div className="text-sm text-[#96939F] mb-4">Elige tu comunidad o grupo</div>
+            {communities.length === 0 ? (
+              <EmptyState text="Todavía no hay comunidades registradas. Elige otra opción." />
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {communities.map((c) => (
+                  <button key={c.id} onClick={() => setCommunityId(c.id)}
+                    className={cx("w-full text-left rounded-lg border px-3 py-2.5 text-sm transition-colors",
+                      communityId === c.id ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38] hover:border-[#5B5866]")}>
+                    <div className="font-medium">{c.name}</div>
+                    <div className="text-xs text-[#96939F]">{c.kind === "independiente" ? "Grupo independiente" : "Comunidad"}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {step === 1 && affiliation === "new-community" && (
+          <>
+            <div className="text-sm text-[#96939F] mb-4">Cuéntanos de tu comunidad o grupo</div>
+            <Field icon={Building2} label="Nombre de la comunidad o grupo" placeholder="Ej: Dynasty Ark Nexus" value={newName} onChange={(e) => setNewName(e.target.value)} />
+            <div className="mb-4">
+              <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Tipo</span>
+              <div className="flex gap-2">
+                <button onClick={() => setNewKind("comunidad")} className={cx("flex-1 text-sm py-2 rounded-lg border", newKind === "comunidad" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Comunidad (con subcomunidades)</button>
+                <button onClick={() => setNewKind("independiente")} className={cx("flex-1 text-sm py-2 rounded-lg border", newKind === "independiente" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Grupo independiente</button>
+              </div>
+            </div>
+            <div className="text-xs text-[#5B5866] mb-2">Un admin creará el registro formal y te asignará como líder al aprobar tu solicitud.</div>
+          </>
+        )}
+
+        {step === 1 && affiliation === "team" && (
+          <div className="text-sm text-[#96939F]">Te unirás directo al equipo de Argyra, sin comunidad. Luego podrás apoyar en la rama que elijas.</div>
+        )}
+
+        {step === 2 && (
+          <>
+            <div className="text-sm text-[#96939F] mb-4">Última pregunta</div>
+            <TextArea label="¿Por qué quieres unirte a Argyra?" placeholder="Cuéntanos brevemente..." value={motivation} onChange={(e) => setMotivation(e.target.value)} rows={4} />
+          </>
+        )}
+
+        {error && <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-4"><AlertCircle size={14} /> {error}</div>}
+
+        <div className="flex gap-2 mt-2">
+          {step > 0 && <GhostButton onClick={back} className="w-auto px-4"><ArrowLeft size={16} /></GhostButton>}
+          {step < 2 ? (
+            <PrimaryButton onClick={next}>Continuar <ChevronRight size={16} /></PrimaryButton>
+          ) : (
+            <PrimaryButton onClick={submit} disabled={busy}>
+              {busy ? <Loader2 size={16} className="animate-spin" /> : null} Continuar
+            </PrimaryButton>
+          )}
+        </div>
       </div>
     </Shell>
   );
 }
 
-/* ---------------- Terms & submit ---------------- */
+/* ---------------- Términos y envío de solicitud ---------------- */
 
 function TermsScreen({ uid, onSubmitted }) {
-  const [sending, setSending] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
-  const send = async () => {
-    setSending(true);
-    await updateDoc(doc(db, "users", uid), { status: "submitted", submittedAt: Date.now() });
-    await syncDirectory(uid, { status: "submitted" });
-    setSending(false);
-    onSubmitted();
+  const submit = async () => {
+    if (!accepted) { setError("Debes aceptar para continuar."); return; }
+    setBusy(true);
+    try {
+      await updateDoc(doc(db, "users", uid), { status: "submitted" });
+      await syncDirectory(uid, { status: "submitted" });
+      onSubmitted();
+    } catch (e) { setError(firebaseErrorToMessage(e)); }
+    setBusy(false);
   };
 
   return (
     <Shell>
       <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
-        <h2 className="text-lg font-semibold mb-4">Términos, condiciones y beneficios</h2>
-
-        <div className="mb-5">
-          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Términos y condiciones</div>
-          <ul className="space-y-2 text-sm text-[#D8D5E0]">
-            <li className="flex gap-2">
-              <CheckCircle2 size={15} className="text-[#6C6CF0] shrink-0 mt-0.5" />
-              Aceptas apoyar a la comunidad y seguir sus reglas.
-            </li>
-            <li className="flex gap-2">
-              <CheckCircle2 size={15} className="text-[#6C6CF0] shrink-0 mt-0.5" />
-              Para ser aceptado, debes permitir el ingreso de un administrador nuestro a tu grupo de WhatsApp y otorgarle administración, para verificar que administras un grupo activo — así podemos empezar a apoyarte.
-            </li>
-          </ul>
+        <div className="text-sm font-semibold mb-2">Antes de enviar tu solicitud</div>
+        <div className="text-xs text-[#96939F] leading-relaxed mb-4 space-y-2">
+          <p>Al unirte a Argyra te comprometes a respetar a las demás comunidades y personas, seguir las normas de cada espacio y actuar de buena fe.</p>
+          <p>Tu solicitud será revisada por un administrador, quien confirmará tu comunidad/grupo (o la registrará si es nueva) y tu rol inicial.</p>
         </div>
-
-        <div className="mb-6">
-          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Beneficios</div>
-          <ul className="space-y-2 text-sm text-[#D8D5E0]">
-            <li className="flex gap-2">
-              <Sparkles size={15} className="text-[#C9A036] shrink-0 mt-0.5" />
-              Apoyo en la gestión y organización de tu comunidad.
-            </li>
-            <li className="flex gap-2">
-              <Sparkles size={15} className="text-[#C9A036] shrink-0 mt-0.5" />
-              Herramientas, coordinación y respaldo continuo.
-            </li>
-          </ul>
-        </div>
-
-        <PrimaryButton onClick={send} disabled={sending}>
-          {sending ? <Loader2 size={16} className="animate-spin" /> : "Enviar solicitud"}
+        <label className="flex items-start gap-2 mb-5 cursor-pointer">
+          <input type="checkbox" checked={accepted} onChange={(e) => setAccepted(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm text-[#F2F0EB]">Acepto y quiero enviar mi solicitud</span>
+        </label>
+        {error && <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-4"><AlertCircle size={14} /> {error}</div>}
+        <PrimaryButton onClick={submit} disabled={busy}>
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Enviar solicitud
         </PrimaryButton>
       </div>
     </Shell>
   );
 }
 
-/* ---------------- Profile ---------------- */
+/* ---------------- Perfil ---------------- */
 
-function ProfileScreen({ record, uid, onLogout, onSaved }) {
-  const [groups, setGroups] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [managedCount, setManagedCount] = useState(record.groupsManaged ?? "");
-  const [savingManaged, setSavingManaged] = useState(false);
-  const [managedError, setManagedError] = useState("");
-  const [managedSaved, setManagedSaved] = useState(false);
+function ProfileScreen({ record, uid, onLogout, onSaved, community }) {
+  const [phone, setPhone] = useState(record.phone || "");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const phoneCheck = phone.length > 0 ? validatePhone(phone) : null;
+  const phoneError = phoneCheck && !phoneCheck.valid ? phoneCheck.message : "";
 
-  const myRanks = userRanks(record);
-
-  const saveManagedCount = async () => {
-    setManagedError("");
-    setManagedSaved(false);
-    const n = parseInt(managedCount, 10);
-    if (isNaN(n) || n < 0) {
-      setManagedError("Escribe un número válido (0 o más).");
-      return;
-    }
-    setSavingManaged(true);
+  const save = async () => {
+    if (phoneError) return;
+    setSaving(true);
     try {
-      await updateDoc(doc(db, "users", uid), { groupsManaged: n });
-      await syncDirectory(uid, { groupsManaged: n });
-      onSaved && onSaved();
-      setManagedSaved(true);
-    } catch (e) {
-      setManagedError("No se pudo guardar. Intenta de nuevo.");
-    }
-    setSavingManaged(false);
+      await updateDoc(doc(db, "users", uid), { phone: phone.trim() });
+      setMsg("Guardado.");
+      onSaved();
+    } catch (e) {}
+    setSaving(false);
   };
 
-  useEffect(() => {
-    const unsub = onSnapshot(
-      collection(db, "groups"),
-      (snap) => {
-        setGroups(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        setLoading(false);
-      },
-      () => setLoading(false)
-    );
-    return unsub;
-  }, []);
-
-  // Un grupo es accesible si es público (sin rangos asignados) o si
-  // comparte al menos uno de los rangos/títulos de la persona.
-  const myGroups = groups.filter((g) => !g.ranks?.length || g.ranks.some((r) => myRanks.includes(r)));
+  const waHref = waLink(record.phone);
 
   return (
     <div>
-      <TopBar title="Perfil" />
-      <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
-        <div className="flex items-start justify-between mb-4">
+      <TopBar title="Mi perfil" />
+      <SectionCard>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-12 h-12 rounded-full bg-[#1D1F2A] border border-[#2A2C38] flex items-center justify-center text-lg font-semibold" style={{ color: "#C9A036" }}>
+            {(record.nick || "?").slice(0, 1).toUpperCase()}
+          </div>
           <div>
-            <div className="text-lg font-semibold">{record.nick}</div>
-            <div className="text-xs text-[#96939F]">{record.email}</div>
-          </div>
-          <StatusBadge status={record.status} />
-        </div>
-
-        {record.status === "submitted" && (
-          <div className="text-sm text-[#D8D5E0] bg-[#1D1F2A] border border-[#2A2C38] rounded-lg p-4">
-            Tu solicitud fue enviada y está siendo revisada por el Consejo Coordinador. Vuelve más tarde para ver si fue aceptada.
-          </div>
-        )}
-
-        {record.status === "rejected" && (
-          <div className="text-sm text-[#D8D5E0] bg-[#1D1F2A] border border-[#2A2C38] rounded-lg p-4">
-            Tu solicitud no fue aceptada esta vez.
-          </div>
-        )}
-
-        {record.status === "accepted" && (
-          <div>
-            {myRanks.length === 0 && (
-              <div className="text-sm text-[#D8D5E0] bg-[#1D1F2A] border border-[#2A2C38] rounded-lg p-4 mb-4">
-                Todavía no tienes un rango asignado. Un administrador te lo asignará pronto.
-              </div>
-            )}
-
-            {myRanks.length > 0 && (
-              <div className="space-y-3 mb-4">
-                {myRanks.map((rk) => {
-                  const r = RANKS[rk];
-                  if (!r) return null;
-                  return (
-                    <div key={rk} className="rounded-xl p-4 border" style={{ borderColor: r.color, background: `${r.color}14` }}>
-                      <span className="font-semibold" style={{ color: r.color }}>{r.label}</span>
-                      <div className="text-sm text-[#D8D5E0]">{r.title}</div>
-                      <p className="text-xs text-[#96939F] mt-2">{r.blurb}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <div className="bg-[#1D1F2A] border border-[#2A2C38] rounded-lg p-4 mb-4">
-              <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Grupos que administras</span>
-              <p className="text-[11px] text-[#5B5866] mb-3">Este número se muestra en Comunidad junto a tu nombre.</p>
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  min="0"
-                  value={managedCount}
-                  onChange={(e) => { setManagedCount(e.target.value); setManagedSaved(false); }}
-                  className="w-24 bg-[#12131A] border border-[#2A2C38] rounded-lg px-3 py-2 text-sm text-[#F2F0EB] outline-none focus:border-[#6C6CF0]"
-                  placeholder="0"
-                />
-                <button
-                  onClick={saveManagedCount}
-                  disabled={savingManaged}
-                  className="flex-1 bg-[#6C6CF0] hover:bg-[#5A5AE0] disabled:opacity-40 text-white text-sm font-medium rounded-lg px-4 transition-colors"
-                >
-                  {savingManaged ? <Loader2 size={14} className="animate-spin mx-auto" /> : "Guardar"}
-                </button>
-              </div>
-              {managedError && <span className="block text-[11px] text-[#E07A7A] mt-1.5">{managedError}</span>}
-              {managedSaved && !managedError && <span className="block text-[11px] text-[#4E9A6B] mt-1.5">Guardado.</span>}
+            <div className="font-semibold">{record.nick}</div>
+            <div className="flex items-center gap-2 mt-1">
+              <RoleBadge role={record.role} />
+              <StatusBadge status={record.status} />
             </div>
-
-            <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Tus enlaces de grupo</div>
-            {loading && <div className="text-xs text-[#5B5866]">Cargando…</div>}
-            {!loading && myGroups.length === 0 && (
-              <p className="text-xs text-[#96939F]">Un administrador todavía no configuró enlaces para tus rangos.</p>
-            )}
-            {!loading && myGroups.length > 0 && (
-              <div className="space-y-2">
-                {myGroups.map((g) => (
-                  <a
-                    key={g.id}
-                    href={g.link || "#"}
-                    target="_blank" rel="noreferrer"
-                    className={cx("flex items-center justify-between px-4 py-3 rounded-lg border text-sm", g.link ? "border-[#2A2C38] hover:border-[#6C6CF0]" : "border-[#2A2C38] opacity-40 pointer-events-none")}
-                  >
-                    {g.name} <ExternalLink size={14} />
-                  </a>
-                ))}
-              </div>
-            )}
+          </div>
+        </div>
+        <SealBadge sello={record.sello} />
+        {record.role === "coordinador" && record.branches?.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-3">
+            {record.branches.map((b) => <BranchChip key={b} branchKey={b} />)}
           </div>
         )}
+        <div className="text-sm text-[#96939F] mt-3">
+          {community ? <>Comunidad: <span className="text-[#F2F0EB]">{community.name}</span></> : record.communityId === null && record.affiliation === "team" ? "Equipo directo de Argyra (sin comunidad)" : "Sin comunidad asignada aún"}
+        </div>
+      </SectionCard>
 
-        <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 text-sm text-[#96939F] hover:text-[#F2F0EB] mt-6 pt-4 border-t border-[#2A2C38]">
-          <LogOut size={14} /> Cerrar sesión
-        </button>
-      </div>
+      <SectionCard title="Contacto" icon={Phone}>
+        <Field icon={Phone} label="Teléfono" value={phone} onChange={(e) => setPhone(sanitizePhone(e.target.value))} error={phoneError} />
+        {waHref && (
+          <a href={waHref} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-xs text-[#4E9A6B] mb-3">
+            <MessageCircle size={14} /> Abrir WhatsApp
+          </a>
+        )}
+        {msg && <div className="text-xs text-[#4E9A6B] mb-3">{msg}</div>}
+        <PrimaryButton onClick={save} disabled={saving || !!phoneError}>
+          {saving ? <Loader2 size={16} className="animate-spin" /> : "Guardar cambios"}
+        </PrimaryButton>
+      </SectionCard>
+
+      <GhostButton onClick={onLogout} className="mt-2"><LogOut size={16} /> Cerrar sesión</GhostButton>
     </div>
   );
 }
 
-/* ---------------- Navegación principal (post-onboarding) ---------------- */
+/* ---------------- Directorio Central (anuncios entre comunidades) ---------------- */
 
-function TopBar({ title, onBack }) {
-  return (
-    <div className="flex items-center gap-3 mb-5">
-      {onBack && (
-        <button onClick={onBack} className="text-[#96939F] hover:text-[#F2F0EB]">
-          <ArrowLeft size={18} />
-        </button>
-      )}
-      <div className="text-lg font-semibold">{title}</div>
-    </div>
-  );
-}
-
-function BottomNav({ tab, setTab, isAdmin }) {
-  const items = [
-    { key: "home", label: "Inicio", icon: Home },
-    { key: "directory", label: "Comunidad", icon: Users },
-    { key: "leaders", label: "Líderes", icon: Crown },
-    { key: "profile", label: "Perfil", icon: UserIcon },
-  ];
-  if (isAdmin) items.push({ key: "admin", label: "Admin", icon: Shield });
-  return (
-    <div className="fixed bottom-0 left-0 right-0 z-20 bg-[#12131A]/95 backdrop-blur border-t border-[#2A2C38]">
-      <div className="max-w-md mx-auto flex">
-        {items.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={cx(
-              "flex-1 flex flex-col items-center gap-1 py-2.5 text-[10px] uppercase tracking-wide transition-colors",
-              tab === key ? "text-[#6C6CF0]" : "text-[#5B5866] hover:text-[#96939F]"
-            )}
-          >
-            <Icon size={18} />
-            {label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- Inicio: noticias / información de la comunidad ---------------- */
-
-function HomeFeed({ isAdmin }) {
-  const [news, setNews] = useState([]);
+function DirectorioCentralScreen({ isAdmin, record, communities }) {
+  const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [scope, setScope] = useState("global");
+  const [communityId, setCommunityId] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const canPost = isAdmin || record.role === "lider" || (record.role === "coordinador" && record.branches?.includes("relaciones"));
 
   useEffect(() => {
-    const q = query(collection(db, "news"), orderBy("createdAt", "desc"));
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        setNews(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        setLoading(false);
-      },
-      () => {
-        setError("No se pudieron cargar las noticias.");
-        setLoading(false);
-      }
-    );
+    const q = query(collection(db, "announcements"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(q, (snap) => {
+      setItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
     return unsub;
   }, []);
 
   const publish = async () => {
     if (!title.trim() || !body.trim()) return;
-    setSaving(true);
+    setBusy(true);
     try {
-      const id = `n_${Date.now()}`;
-      await setDoc(doc(db, "news", id), {
-        title: title.trim(),
-        body: body.trim(),
+      await addDoc(collection(db, "announcements"), {
+        title: title.trim(), body: body.trim(),
+        scope, communityId: scope === "community" ? communityId : null,
+        authorUid: null, authorName: record.nick,
         createdAt: Date.now(),
       });
       setTitle(""); setBody(""); setShowForm(false);
-      // No hace falta recargar: onSnapshot ya trae la noticia nueva sola.
-    } catch (e) {
-      setError("No se pudo publicar la noticia.");
-    }
-    setSaving(false);
-  };
-
-  const remove = async (id) => {
-    const sure = window.confirm("¿Eliminar esta publicación?");
-    if (!sure) return;
-    await deleteDoc(doc(db, "news", id));
+    } catch (e) {}
+    setBusy(false);
   };
 
   return (
     <div>
-      <TopBar title="Inicio" />
-      <div className="text-sm text-[#96939F] mb-5">
-        Noticias e información de la Unión de Comunidades.
-      </div>
+      <TopBar title="Directorio Central" right={canPost && (
+        <button onClick={() => setShowForm((s) => !s)} className="text-[#6C6CF0]"><Plus size={20} /></button>
+      )} />
+      <p className="text-xs text-[#5B5866] mb-4">Anuncios entre comunidades. Aquí se comparten novedades a toda Argyra o a comunidades específicas.</p>
 
-      {isAdmin && (
-        <div className="mb-5">
-          {!showForm ? (
-            <button
-              onClick={() => setShowForm(true)}
-              className="w-full flex items-center justify-center gap-2 border border-dashed border-[#2A2C38] hover:border-[#6C6CF0] rounded-xl py-3 text-sm text-[#96939F] hover:text-[#6C6CF0] transition-colors"
-            >
-              <Plus size={15} /> Publicar noticia
-            </button>
-          ) : (
-            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5">
-              <Field label="Título" placeholder="Título de la noticia" value={title} onChange={(e) => setTitle(e.target.value)} />
-              <label className="block mb-4">
-                <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Contenido</span>
-                <textarea
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  rows={4}
-                  className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB] outline-none focus:border-[#6C6CF0] resize-none"
-                  placeholder="Escribe la información para la comunidad..."
-                />
-              </label>
-              <div className="flex gap-2">
-                <PrimaryButton onClick={publish} disabled={saving || !title.trim() || !body.trim()}>
-                  {saving ? <Loader2 size={16} className="animate-spin" /> : "Publicar"}
-                </PrimaryButton>
-                <button onClick={() => setShowForm(false)} className="px-4 text-sm text-[#96939F] hover:text-[#F2F0EB]">
-                  Cancelar
-                </button>
-              </div>
+      {showForm && (
+        <SectionCard title="Nuevo anuncio" icon={Megaphone}>
+          <Field label="Título" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título del anuncio" />
+          <TextArea label="Contenido" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Escribe el anuncio..." />
+          <div className="mb-4">
+            <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Alcance</span>
+            <div className="flex gap-2 mb-2">
+              <button onClick={() => setScope("global")} className={cx("flex-1 text-sm py-2 rounded-lg border", scope === "global" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Toda Argyra</button>
+              <button onClick={() => setScope("community")} className={cx("flex-1 text-sm py-2 rounded-lg border", scope === "community" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Una comunidad</button>
             </div>
-          )}
-        </div>
-      )}
-
-      {loading && (
-        <div className="flex items-center gap-2 text-sm text-[#96939F]">
-          <Loader2 size={14} className="animate-spin" /> Cargando…
-        </div>
-      )}
-
-      {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
-
-      {!loading && !error && news.length === 0 && (
-        <div className="text-sm text-[#5B5866] text-center py-10">
-          <Newspaper size={22} className="mx-auto mb-2 opacity-50" />
-          Todavía no hay noticias publicadas.
-        </div>
-      )}
-
-      <div className="space-y-3">
-        {news.map((n) => (
-          <div key={n.id} className="bg-[#16171F] border border-[#2A2C38] rounded-xl p-4">
-            <div className="flex items-start justify-between gap-2 mb-1.5">
-              <div className="font-medium text-sm">{n.title}</div>
-              {isAdmin && (
-                <button onClick={() => remove(n.id)} className="text-[#5B5866] hover:text-[#E07A7A] shrink-0">
-                  <Trash2 size={14} />
-                </button>
-              )}
-            </div>
-            <p className="text-sm text-[#D8D5E0] whitespace-pre-wrap">{n.body}</p>
-            {n.createdAt && (
-              <div className="text-[11px] text-[#5B5866] mt-2">
-                {new Date(n.createdAt).toLocaleDateString()}
-              </div>
+            {scope === "community" && (
+              <select value={communityId} onChange={(e) => setCommunityId(e.target.value)} className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB]">
+                <option value="">Elige comunidad...</option>
+                {communities.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
             )}
           </div>
-        ))}
-      </div>
+          <PrimaryButton onClick={publish} disabled={busy || !title.trim() || !body.trim() || (scope === "community" && !communityId)}>
+            {busy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Publicar
+          </PrimaryButton>
+        </SectionCard>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
+      ) : items.length === 0 ? (
+        <EmptyState text="Todavía no hay anuncios." />
+      ) : (
+        items.map((it) => (
+          <SectionCard key={it.id}>
+            <div className="flex items-center justify-between mb-1">
+              <div className="font-semibold text-sm">{it.title}</div>
+              {it.scope === "community" ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full border border-[#2A2C38] text-[#96939F]">
+                  {communities.find((c) => c.id === it.communityId)?.name || "Comunidad"}
+                </span>
+              ) : (
+                <span className="text-[10px] px-2 py-0.5 rounded-full border border-[#C9A036] text-[#C9A036]">Toda Argyra</span>
+              )}
+            </div>
+            <div className="text-sm text-[#96939F] whitespace-pre-wrap mb-2">{it.body}</div>
+            <div className="text-[11px] text-[#5B5866]">{it.authorName} · {formatDate(it.createdAt)}</div>
+          </SectionCard>
+        ))
+      )}
     </div>
   );
 }
 
-/* ---------------- Comunidad: directorio de miembros ---------------- */
+/* ---------------- Comunidades ---------------- */
 
-function DirectoryScreen({ canView, myRanks, isAdmin }) {
-  const [members, setMembers] = useState([]);
-  const [groups, setGroups] = useState([]);
+function CommunitiesScreen({ record, isAdmin }) {
+  const [communities, setCommunities] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  // Solo para administradores: copia con teléfono + respuestas del
-  // registro (users/{uid}.answers), para el buscador y el detalle.
-  const [adminExtra, setAdminExtra] = useState({});
-  const [filterKey, setFilterKey] = useState(""); // "rankKey||texto de la opción"
-  const [searchText, setSearchText] = useState(""); // búsqueda por nombre o número
-  const [selectedMember, setSelectedMember] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [people, setPeople] = useState([]);
 
   useEffect(() => {
-    if (!canView) { setLoading(false); return; }
-    setLoading(true);
-    let dirReady = false, groupsReady = false;
-    const maybeStopLoading = () => { if (dirReady && groupsReady) setLoading(false); };
-
-    const unsubDir = onSnapshot(
-      collection(db, "directory"),
-      (snap) => {
-        const recs = snap.docs
-          .map((d) => ({ id: d.id, ...d.data() }))
-          // Solo se muestran miembros ya registrados y aceptados en la comunidad.
-          .filter((m) => m.status === "accepted");
-        recs.sort((a, b) => {
-          const ra = userRanks(a).length ? TITLE_ORDER.indexOf(userRanks(a)[0]) : 99;
-          const rb = userRanks(b).length ? TITLE_ORDER.indexOf(userRanks(b)[0]) : 99;
-          if (ra !== rb) return ra - rb;
-          return (a.nick || "").localeCompare(b.nick || "");
-        });
-        setMembers(recs);
-        dirReady = true;
-        maybeStopLoading();
-      },
-      () => { setError("No se pudo cargar la información de la comunidad."); dirReady = true; maybeStopLoading(); }
-    );
-    const unsubGroups = onSnapshot(
-      collection(db, "groups"),
-      (snap) => {
-        setGroups(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        groupsReady = true;
-        maybeStopLoading();
-      },
-      () => { groupsReady = true; maybeStopLoading(); }
-    );
-    return () => { unsubDir(); unsubGroups(); };
-  }, [canView]);
-
-  // Solo para administradores: teléfono + qué marcó cada quien en su
-  // registro (users/{uid}.answers), para poder verlo y buscar por opción.
-  useEffect(() => {
-    if (!canView || !isAdmin) { setAdminExtra({}); return; }
-    const unsub = onSnapshot(
-      collection(db, "users"),
-      (snap) => {
-        const map = {};
-        snap.docs.forEach((d) => {
-          const data = d.data();
-          map[d.id] = { phone: data.phone || "", answers: data.answers || null };
-        });
-        setAdminExtra(map);
-      },
-      () => {}
-    );
+    const q = query(collection(db, "communities"), orderBy("name"));
+    const unsub = onSnapshot(q, (snap) => {
+      setCommunities(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
     return unsub;
-  }, [canView, isAdmin]);
+  }, []);
 
-  if (!canView) {
-    return (
-      <div>
-        <TopBar title="Comunidad" />
-        <div className="text-sm text-[#5B5866] text-center py-14">
-          <Lock size={22} className="mx-auto mb-2 opacity-50" />
-          Esta sección es solo para miembros ya aceptados de la comunidad.
-        </div>
-      </div>
-    );
+  useEffect(() => {
+    const q = query(collection(db, "directory"));
+    const unsub = onSnapshot(q, (snap) => setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() }))), () => {});
+    return unsub;
+  }, []);
+
+  if (openId) {
+    const c = communities.find((x) => x.id === openId);
+    if (!c) { setOpenId(null); return null; }
+    return <CommunityDetail community={c} onBack={() => setOpenId(null)} record={record} isAdmin={isAdmin}
+      members={people.filter((p) => p.communityId === c.id)} />;
   }
 
-  const myGroups = groups.filter((g) => !g.ranks?.length || g.ranks.some((r) => myRanks.includes(r)));
+  return (
+    <div>
+      <TopBar title="Comunidades" />
+      <p className="text-xs text-[#5B5866] mb-4">Comunidades y grupos independientes afiliados a Argyra.</p>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
+      ) : communities.length === 0 ? (
+        <EmptyState text="Todavía no hay comunidades registradas." />
+      ) : (
+        communities.map((c) => (
+          <button key={c.id} onClick={() => setOpenId(c.id)} className="w-full text-left">
+            <SectionCard>
+              <div className="flex items-center justify-between mb-1">
+                <div className="font-semibold text-sm flex items-center gap-2">
+                  <Building2 size={15} className="text-[#6C6CF0]" /> {c.name}
+                </div>
+                <StatusPill status={c.status} />
+              </div>
+              <div className="text-xs text-[#96939F] mb-2">
+                {c.kind === "independiente" ? "Grupo independiente" : `Comunidad · ${c.subcommunities?.length || 0} subcomunidad(es)`}
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-[#5B5866]">
+                <span>Líder: {c.leaderName || "—"}</span>
+                <span>Sello: {formatDate(c.sealDate)}</span>
+              </div>
+            </SectionCard>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
 
-  // Filtro de búsqueda por opción marcada en el registro (solo admin).
-  const [filterRank, filterText] = filterKey ? filterKey.split("||") : ["", ""];
+function CommunityDetail({ community: c, onBack, record, isAdmin, members }) {
+  const [tab, setTab] = useState("info");
+  const canSeeEmbassy =
+    isAdmin || record.role === "lider" ||
+    (record.role === "coordinador" && record.branches?.includes("relaciones")) ||
+    record.communityId === c.id;
 
-  // Búsqueda por nombre (para todos) o número (solo admin, único que ve teléfonos).
-  const searchLower = searchText.trim().toLowerCase();
-  const searchDigits = searchLower.replace(/[^0-9]/g, "");
-  const matchesSearch = (m) => {
-    if (!searchLower) return true;
-    if ((m.nick || "").toLowerCase().includes(searchLower)) return true;
-    if (isAdmin && searchDigits) {
-      const phone = (adminExtra[m.id]?.phone || "").replace(/[^0-9]/g, "");
-      if (phone.includes(searchDigits)) return true;
-    }
-    return false;
-  };
+  return (
+    <div>
+      <TopBar title={c.name} onBack={onBack} />
+      <div className="flex mb-4 bg-[#1D1F2A] rounded-lg p-1">
+        <button onClick={() => setTab("info")} className={cx("flex-1 text-xs py-2 rounded-md transition-colors", tab === "info" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>Información</button>
+        {canSeeEmbassy && (
+          <button onClick={() => setTab("embassy")} className={cx("flex-1 text-xs py-2 rounded-md transition-colors", tab === "embassy" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>Embajada</button>
+        )}
+      </div>
 
-  const visibleMembers = members.filter(matchesSearch).filter((m) => {
-    if (!isAdmin || !filterKey) return true;
-    const answers = adminExtra[m.id]?.answers;
-    const list = answers?.tareasDetalle?.[filterRank] || [];
-    return list.includes(filterText);
-  });
+      {tab === "info" && (
+        <>
+          <SectionCard>
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs text-[#96939F]">{c.kind === "independiente" ? "Grupo independiente" : "Comunidad"}</span>
+              <StatusPill status={c.status} />
+            </div>
+            <div className="text-sm space-y-2">
+              <div><span className="text-[#96939F]">Líder:</span> {c.leaderName || "—"}
+                {c.leaderPhone && <a href={waLink(c.leaderPhone)} target="_blank" rel="noreferrer" className="ml-2 text-[#4E9A6B] text-xs inline-flex items-center gap-1"><MessageCircle size={12} />WhatsApp</a>}
+              </div>
+              {c.kind === "comunidad" && (
+                <>
+                  <div><span className="text-[#96939F]">Embajador titular:</span> {c.ambassadorMainName || "—"}</div>
+                  <div><span className="text-[#96939F]">Embajador suplente:</span> {c.ambassadorAltName || "—"}</div>
+                </>
+              )}
+              <div><span className="text-[#96939F]">Fecha del Sello:</span> {formatDate(c.sealDate)}</div>
+              {c.notes && <div className="text-xs text-[#96939F] italic mt-2">{c.notes}</div>}
+            </div>
+          </SectionCard>
 
-  // ---- Vista de detalle de un miembro (solo administradores) ----
-  if (isAdmin && selectedMember) {
-    const extra = adminExtra[selectedMember.id] || {};
-    const wa = waLink(extra.phone);
-    const ranks = userRanks(selectedMember);
-    const answers = extra.answers;
-    return (
-      <div>
-        <TopBar title="Perfil del miembro" onBack={() => setSelectedMember(null)} />
-        <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
-          <div className="text-lg font-semibold">{selectedMember.nick || "Usuario"}</div>
-          <div className="flex flex-wrap gap-1.5 mt-2 mb-4">
-            {ranks.length === 0 && <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>}
-            {ranks.map((rk) => {
-              const r = RANKS[rk];
-              if (!r) return null;
-              return (
-                <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
-                  {r.label}
-                </span>
-              );
-            })}
-          </div>
-
-          {!!selectedMember.groupsManaged && (
-            <div className="text-sm text-[#D8D5E0] mb-4">Administra {selectedMember.groupsManaged} grupo{selectedMember.groupsManaged === 1 ? "" : "s"}.</div>
-          )}
-
-          {wa ? (
-            <a
-              href={wa} target="_blank" rel="noreferrer"
-              className="w-full flex items-center justify-center gap-2 bg-[#4E9A6B] hover:bg-[#43855C] text-white font-medium text-sm rounded-lg px-4 py-2.5 transition-colors mb-5"
-            >
-              <MessageCircle size={16} /> Contactar por WhatsApp
-            </a>
-          ) : (
-            <p className="text-xs text-[#5B5866] mb-5">Esta persona aún no tiene un número configurado.</p>
-          )}
-
-          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Lo que marcó en su registro</div>
-          {!answers ? (
-            <p className="text-xs text-[#5B5866]">No hay datos de registro disponibles todavía.</p>
-          ) : (
-            <div className="space-y-3">
-              {answers.experiencia && (
-                <div className="text-sm text-[#D8D5E0]">
-                  <span className="text-[#96939F]">¿Experiencia previa? </span>{answers.experiencia}
+          {c.kind === "comunidad" && (
+            <SectionCard title="Subcomunidades" icon={Landmark}>
+              {(!c.subcommunities || c.subcommunities.length === 0) ? (
+                <EmptyState text="Sin subcomunidades registradas." />
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {c.subcommunities.map((s, i) => (
+                    <span key={i} className="text-xs px-2.5 py-1 rounded-full border border-[#2A2C38] text-[#96939F]">{s}</span>
+                  ))}
                 </div>
               )}
-              {(answers.tareas || []).map((rk) => {
-                const r = RANKS[rk];
-                const opciones = answers.tareasDetalle?.[rk] || [];
-                return (
-                  <div key={rk} className="rounded-lg p-3 border" style={{ borderColor: `${r?.color || "#2A2C38"}55` }}>
-                    <div className="text-xs font-semibold mb-1.5" style={{ color: r?.color }}>{r?.label || rk}</div>
-                    <ul className="space-y-1">
-                      {opciones.map((op, i) => (
-                        <li key={i} className="text-xs text-[#D8D5E0] flex items-start gap-1.5">
-                          <CheckCircle2 size={12} className="mt-0.5 shrink-0" style={{ color: r?.color }} />
-                          {op}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <TopBar title="Comunidad" />
-
-      {loading && (
-        <div className="flex items-center gap-2 text-sm text-[#96939F]">
-          <Loader2 size={14} className="animate-spin" /> Cargando…
-        </div>
-      )}
-      {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
-
-      {!loading && !error && (
-        <>
-          <div className="flex items-center justify-between bg-[#16171F] border border-[#2A2C38] rounded-xl px-4 py-3 mb-5">
-            <span className="text-sm text-[#D8D5E0]">Miembros totales en la comunidad</span>
-            <span className="text-lg font-semibold text-[#C9A036]">{members.length}</span>
-          </div>
-
-          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Grupos por función / proyecto</div>
-          {myGroups.length === 0 && (
-            <p className="text-xs text-[#5B5866] mb-5">Todavía no hay grupos configurados para tus rangos.</p>
-          )}
-          {myGroups.length > 0 && (
-            <div className="space-y-2 mb-6">
-              {myGroups.map((g) => (
-                <a
-                  key={g.id}
-                  href={g.link || "#"}
-                  target="_blank" rel="noreferrer"
-                  className={cx("flex items-center justify-between px-4 py-3 rounded-lg border text-sm", g.link ? "border-[#2A2C38] hover:border-[#6C6CF0]" : "border-[#2A2C38] opacity-40 pointer-events-none")}
-                >
-                  <span>
-                    {g.name}
-                    {g.description && <span className="block text-[11px] text-[#96939F] font-normal">{g.description}</span>}
-                  </span>
-                  <ExternalLink size={14} className="shrink-0 ml-2" />
-                </a>
-              ))}
-            </div>
+            </SectionCard>
           )}
 
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-xs uppercase tracking-wide text-[#96939F]">Miembros ({visibleMembers.length}{(filterKey || searchText) ? ` de ${members.length}` : ""})</div>
-          </div>
-
-          <div className="mb-3">
-            <div className="flex items-center gap-2 bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 focus-within:border-[#6C6CF0] transition-colors">
-              <Users size={14} className="text-[#5B5866] shrink-0" />
-              <input
-                value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
-                placeholder={isAdmin ? "Buscar por nombre o número…" : "Buscar por nombre…"}
-                className="bg-transparent outline-none w-full text-[#F2F0EB] placeholder:text-[#5B5866] text-sm"
-              />
-              {searchText && (
-                <button onClick={() => setSearchText("")} className="text-[#5B5866] hover:text-[#F2F0EB] shrink-0">
-                  <X size={14} />
-                </button>
-              )}
-            </div>
-          </div>
-
-          {isAdmin && (
-            <div className="mb-3">
-              <select
-                value={filterKey}
-                onChange={(e) => setFilterKey(e.target.value)}
-                className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB] outline-none focus:border-[#6C6CF0]"
-              >
-                <option value="">Buscar por lo que marcó en su registro…</option>
-                {RANK_ORDER.map((rk) => (
-                  <optgroup key={rk} label={RANKS[rk].label}>
-                    {SUBTASKS[rk].map((txt, idx) => (
-                      <option key={idx} value={`${rk}||${txt}`}>{txt}</option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-              {filterKey && visibleMembers.length === 0 && (
-                <p className="text-xs text-[#5B5866] mt-2">Nadie marcó esta opción en su registro.</p>
-              )}
-            </div>
-          )}
-
-          {!filterKey && searchText && visibleMembers.length === 0 && (
-            <p className="text-xs text-[#5B5866] mb-3">No se encontró ningún miembro con ese nombre{isAdmin ? " o número" : ""}.</p>
-          )}
-
-          <div className="space-y-2">
-            {visibleMembers.map((m) => {
-              const ranks = userRanks(m);
-              const Row = isAdmin ? "button" : "div";
-              return (
-                <Row
-                  key={m.id}
-                  onClick={isAdmin ? () => setSelectedMember(m) : undefined}
-                  className={cx(
-                    "w-full flex items-center justify-between gap-2 bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm text-left",
-                    isAdmin && "hover:border-[#6C6CF0] transition-colors"
-                  )}
-                >
-                  <div className="min-w-0">
-                    <span className="truncate block">{m.nick || "Usuario"}</span>
-                    {!!m.groupsManaged && (
-                      <span className="text-[10px] text-[#96939F]">Administra {m.groupsManaged} grupo{m.groupsManaged === 1 ? "" : "s"}</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <div className="flex flex-wrap gap-1.5 justify-end">
-                      {ranks.length === 0 && <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>}
-                      {ranks.map((rk) => {
-                        const r = RANKS[rk];
-                        if (!r) return null;
-                        return (
-                          <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
-                            {r.label}
-                          </span>
-                        );
-                      })}
-                    </div>
-                    {isAdmin && <ChevronRight size={14} className="text-[#5B5866]" />}
-                  </div>
-                </Row>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-/* ---------------- Líderes: Cúpula y Alto Consejo ---------------- */
-
-function LeadersScreen({ isSuperAdmin }) {
-  const [leaders, setLeaders] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [selected, setSelected] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [nick, setNick] = useState("");
-  const [customTitle, setCustomTitle] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [formError, setFormError] = useState("");
-
-  const [rankMembers, setRankMembers] = useState([]);
-  const [loadingRanks, setLoadingRanks] = useState(true);
-
-  useEffect(() => {
-    const unsub = onSnapshot(
-      collection(db, "leaders"),
-      (snap) => {
-        const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-        recs.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
-        setLeaders(recs);
-        setLoading(false);
-      },
-      () => { setError("No se pudo cargar la lista de líderes."); setLoading(false); }
-    );
-    return unsub;
-  }, []);
-
-  // Directorio de miembros aceptados, para agruparlos por rango debajo
-  // de la explicación de cada rango.
-  useEffect(() => {
-    const unsub = onSnapshot(
-      collection(db, "directory"),
-      (snap) => {
-        const recs = snap.docs
-          .map((d) => ({ id: d.id, ...d.data() }))
-          .filter((m) => m.status === "accepted");
-        setRankMembers(recs);
-        setLoadingRanks(false);
-      },
-      () => setLoadingRanks(false)
-    );
-    return unsub;
-  }, []);
-
-  const addLeader = async () => {
-    setFormError("");
-    const nickLower = nick.trim().toLowerCase();
-    if (!nickLower) {
-      setFormError("Escribe el nick del usuario.");
-      return;
-    }
-    setSaving(true);
-    try {
-      const nameSnap = await getDoc(doc(db, "usernames", nickLower));
-      if (!nameSnap.exists()) {
-        setFormError("No existe ningún usuario registrado con ese nick.");
-        setSaving(false);
-        return;
-      }
-      const { uid } = nameSnap.data();
-      const userSnap = await getDoc(doc(db, "users", uid));
-      const u = userSnap.exists() ? userSnap.data() : {};
-      await setDoc(doc(db, "leaders", uid), {
-        nick: u.nick || nick.trim(),
-        phone: u.phone || "",
-        title: customTitle.trim() || "Cúpula y Alto Consejo",
-        addedAt: Date.now(),
-      });
-      setNick(""); setCustomTitle(""); setShowForm(false);
-      // No hace falta recargar: onSnapshot ya trae el líder nuevo solo.
-    } catch (e) {
-      setFormError("No se pudo agregar al líder. Intenta de nuevo.");
-    }
-    setSaving(false);
-  };
-
-  const removeLeader = async (uid) => {
-    const sure = window.confirm("¿Quitar a esta persona de la lista de líderes?");
-    if (!sure) return;
-    await deleteDoc(doc(db, "leaders", uid));
-  };
-
-  if (selected) {
-    const wa = waLink(selected.phone);
-    return (
-      <div>
-        <TopBar title="Perfil del líder" onBack={() => setSelected(null)} />
-        <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6 text-center">
-          <div className="w-16 h-16 mx-auto rounded-full bg-[#C9A036]/15 border border-[#C9A036]/40 flex items-center justify-center mb-3">
-            <Crown size={24} className="text-[#C9A036]" />
-          </div>
-          <div className="text-lg font-semibold">{selected.nick}</div>
-          <div className="text-xs text-[#96939F] mb-5">{selected.title}</div>
-          {wa ? (
-            <a
-              href={wa} target="_blank" rel="noreferrer"
-              className="w-full flex items-center justify-center gap-2 bg-[#4E9A6B] hover:bg-[#43855C] text-white font-medium text-sm rounded-lg px-4 py-2.5 transition-colors"
-            >
-              <MessageCircle size={16} /> Contactar por WhatsApp
-            </a>
-          ) : (
-            <p className="text-xs text-[#5B5866]">Este líder aún no tiene un número configurado.</p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <TopBar title="Líderes y rangos" />
-      <div className="text-sm text-[#96939F] mb-1">
-        Cúpula y Alto Consejo — Los Jefes y Liderazgo Máximo
-      </div>
-      <p className="text-xs text-[#5B5866] mb-5">
-        Son las autoridades más altas de la comunidad. No moderan el chat del día a día,
-        sino que toman las decisiones más importantes sobre el futuro de la Unión.
-        Son los creadores y dueños del proyecto: tienen la última palabra sobre cualquier
-        asunto, y su decisión es definitiva ante cualquier desacuerdo grave.
-      </p>
-
-      {isSuperAdmin && (
-        <div className="mb-5">
-          {!showForm ? (
-            <button
-              onClick={() => setShowForm(true)}
-              className="w-full flex items-center justify-center gap-2 border border-dashed border-[#2A2C38] hover:border-[#C9A036] rounded-xl py-3 text-sm text-[#96939F] hover:text-[#C9A036] transition-colors"
-            >
-              <Plus size={15} /> Agregar líder
-            </button>
-          ) : (
-            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5">
-              <p className="text-xs text-[#96939F] mb-4">
-                El nick debe pertenecer a un usuario ya registrado en Argyra.
-              </p>
-              <Field
-                icon={UserIcon}
-                label="Nick del usuario"
-                placeholder="ejemplo: mariposa"
-                value={nick}
-                onChange={(e) => setNick(e.target.value)}
-                error={formError}
-              />
-              <Field
-                label="Título / cargo (opcional)"
-                placeholder="Cúpula y Alto Consejo"
-                value={customTitle}
-                onChange={(e) => setCustomTitle(e.target.value)}
-              />
-              <div className="flex gap-2">
-                <PrimaryButton onClick={addLeader} disabled={saving}>
-                  {saving ? <Loader2 size={16} className="animate-spin" /> : "Agregar"}
-                </PrimaryButton>
-                <button onClick={() => setShowForm(false)} className="px-4 text-sm text-[#96939F] hover:text-[#F2F0EB]">
-                  Cancelar
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {loading && (
-        <div className="flex items-center gap-2 text-sm text-[#96939F]">
-          <Loader2 size={14} className="animate-spin" /> Cargando…
-        </div>
-      )}
-      {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
-      {!loading && !error && leaders.length === 0 && (
-        <div className="text-sm text-[#5B5866] text-center py-10">
-          <Crown size={22} className="mx-auto mb-2 opacity-50" />
-          Todavía no se agregaron líderes.
-        </div>
-      )}
-
-      <div className="space-y-2">
-        {leaders.map((l) => (
-          <div key={l.id} className="flex items-center bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-3">
-            <button onClick={() => setSelected(l)} className="flex-1 text-left flex items-center gap-3">
-              <Crown size={16} className="text-[#C9A036] shrink-0" />
-              <div>
-                <div className="text-sm font-medium">{l.nick}</div>
-                <div className="text-[11px] text-[#96939F]">{l.title}</div>
-              </div>
-            </button>
-            {isSuperAdmin && (
-              <button onClick={() => removeLeader(l.id)} className="text-[#5B5866] hover:text-[#E07A7A] shrink-0 ml-2">
-                <Trash2 size={14} />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-8 pt-6 border-t border-[#2A2C38]">
-        <div className="text-lg font-semibold mb-1">Rangos de la comunidad</div>
-        <p className="text-xs text-[#5B5866] mb-5">
-          Cada rango tiene un rol distinto dentro de Argyra. Aquí se explica qué hace cada uno
-          y quiénes lo conforman actualmente.
-        </p>
-
-        {loadingRanks && (
-          <div className="flex items-center gap-2 text-sm text-[#96939F] mb-4">
-            <Loader2 size={14} className="animate-spin" /> Cargando…
-          </div>
-        )}
-
-        {!loadingRanks && (
-          <div className="space-y-5">
-            {TITLE_ORDER.map((rk) => {
-              const r = RANKS[rk];
-              const membersOfRank = rankMembers.filter((m) => userRanks(m).includes(rk));
-              return (
-                <div key={rk} className="rounded-xl border overflow-hidden" style={{ borderColor: `${r.color}55` }}>
-                  <div className="p-4" style={{ background: `${r.color}14` }}>
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold" style={{ color: r.color }}>{r.label}</span>
-                      <span className="text-[10px] uppercase tracking-wide" style={{ color: r.color }}>
-                        {membersOfRank.length} miembro{membersOfRank.length === 1 ? "" : "s"}
-                      </span>
-                    </div>
-                    <div className="text-sm text-[#D8D5E0] mt-0.5">{r.title}</div>
-                    <p className="text-xs text-[#96939F] mt-2">{r.blurb}</p>
-                  </div>
-                  <div className="bg-[#16171F] p-3">
-                    {membersOfRank.length === 0 ? (
-                      <p className="text-xs text-[#5B5866] px-1 py-1">Todavía no hay miembros con este rango.</p>
-                    ) : (
-                      <div className="flex flex-wrap gap-1.5">
-                        {membersOfRank.map((m) => (
-                          <span key={m.id} className="text-xs px-2.5 py-1 rounded-full border border-[#2A2C38] text-[#D8D5E0]">
-                            {m.nick || "Usuario"}
-                            {!!m.groupsManaged && (
-                              <span className="text-[#5B5866]"> · {m.groupsManaged} grupo{m.groupsManaged === 1 ? "" : "s"}</span>
-                            )}
+          <SectionCard title="Miembros" icon={Users}>
+            {members.length === 0 ? <EmptyState text="Sin miembros registrados todavía." /> : (
+              <div className="space-y-2">
+                {ROLE_ORDER.map((rk) => {
+                  const list = members.filter((m) => m.role === rk);
+                  if (list.length === 0) return null;
+                  return (
+                    <div key={rk}>
+                      <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1">{ROLES[rk].label}</div>
+                      <div className="flex flex-wrap gap-1.5 mb-2">
+                        {list.map((m) => (
+                          <span key={m.uid} className="text-xs px-2.5 py-1 rounded-full border border-[#2A2C38] flex items-center gap-1">
+                            {m.nick}
+                            {m.sello?.active && <Stamp size={11} style={{ color: "#C9A036" }} />}
                           </span>
                         ))}
                       </div>
-                    )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </SectionCard>
+        </>
+      )}
+
+      {tab === "embassy" && <EmbassyPanel communityId={c.id} record={record} />}
+    </div>
+  );
+}
+
+/* ---------------- Embajada: espacio privado por comunidad ---------------- */
+
+function EmbassyPanel({ communityId, record }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const q = query(collection(db, "communities", communityId, "embassy"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(q, (snap) => {
+      setItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
+    return unsub;
+  }, [communityId]);
+
+  const send = async () => {
+    if (!body.trim()) return;
+    setBusy(true);
+    try {
+      await addDoc(collection(db, "communities", communityId, "embassy"), {
+        authorName: record.nick, body: body.trim(), createdAt: Date.now(),
+      });
+      setBody("");
+    } catch (e) {}
+    setBusy(false);
+  };
+
+  return (
+    <SectionCard title="Espacio de la Embajada" icon={Landmark}>
+      <p className="text-xs text-[#5B5866] mb-3">Espacio privado: solo lo ven los miembros de esta comunidad, sus embajadores, Relaciones Externas y Líderes.</p>
+      <div className="flex gap-2 mb-4">
+        <input value={body} onChange={(e) => setBody(e.target.value)} placeholder="Escribe un mensaje..."
+          className="flex-1 bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#6C6CF0]" />
+        <button onClick={send} disabled={busy || !body.trim()} className="bg-[#6C6CF0] disabled:opacity-40 rounded-lg px-3"><Send size={16} /></button>
+      </div>
+      {loading ? (
+        <div className="text-sm text-[#96939F] text-center py-4"><Loader2 size={16} className="animate-spin inline" /></div>
+      ) : items.length === 0 ? (
+        <EmptyState text="Sin mensajes todavía." />
+      ) : (
+        <div className="space-y-2 max-h-96 overflow-y-auto">
+          {items.map((m) => (
+            <div key={m.id} className="bg-[#1D1F2A] rounded-lg px-3 py-2">
+              <div className="text-xs font-medium text-[#C9A036]">{m.authorName}</div>
+              <div className="text-sm whitespace-pre-wrap">{m.body}</div>
+              <div className="text-[10px] text-[#5B5866] mt-1">{formatDate(m.createdAt)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+/* ---------------- Equipo (ramas funcionales de Argyra) ---------------- */
+
+function TeamScreen() {
+  const [people, setPeople] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const q = query(collection(db, "directory"));
+    const unsub = onSnapshot(q, (snap) => {
+      setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
+    return unsub;
+  }, []);
+
+  const direct = people.filter((p) => !p.communityId && p.status === "accepted");
+
+  return (
+    <div>
+      <TopBar title="Ramas de Argyra" />
+      <p className="text-xs text-[#5B5866] mb-4">El equipo que sostiene el proyecto, organizado por rama funcional.</p>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
+      ) : (
+        BRANCH_ORDER.map((bk) => {
+          const b = BRANCHES[bk];
+          const Icon = b.icon;
+          const coords = direct.filter((p) => p.role === "coordinador" && p.branches?.includes(bk));
+          const others = direct.filter((p) => p.role !== "coordinador" && p.role !== "lider");
+          return (
+            <SectionCard key={bk} title={b.label} icon={Icon}>
+              <p className="text-xs text-[#96939F] mb-3">{b.blurb}</p>
+              <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1">Coordinadores</div>
+              {coords.length === 0 ? (
+                <div className="text-xs text-[#5B5866] mb-2">Sin coordinador asignado.</div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {coords.map((p) => <span key={p.uid} className="text-xs px-2.5 py-1 rounded-full border" style={{ color: b.color, borderColor: b.color }}>{p.nick}</span>)}
+                </div>
+              )}
+            </SectionCard>
+          );
+        })
+      )}
+      <SectionCard title="Equipo directo (sin comunidad)" icon={Users}>
+        {direct.length === 0 ? <EmptyState text="Nadie registrado directo al equipo todavía." /> : (
+          <div className="space-y-2">
+            {ROLE_ORDER.map((rk) => {
+              const list = direct.filter((p) => p.role === rk);
+              if (list.length === 0) return null;
+              return (
+                <div key={rk}>
+                  <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1">{ROLES[rk].label}</div>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {list.map((p) => <span key={p.uid} className="text-xs px-2.5 py-1 rounded-full border border-[#2A2C38]">{p.nick}</span>)}
                   </div>
                 </div>
               );
             })}
           </div>
         )}
-      </div>
+      </SectionCard>
     </div>
   );
 }
 
-/* ---------------- Admin ---------------- */
+/* ---------------- Líderes (autoridad máxima del proyecto) ---------------- */
 
-function AdminPanel({ onExit, currentUid }) {
-  const [tab, setTab] = useState("solicitudes");
-  const [users, setUsers] = useState([]);
-  const [adminUids, setAdminUids] = useState([]);
+function LeadersScreen() {
+  const [people, setPeople] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [groups, setGroups] = useState([]);
+  const [communities, setCommunities] = useState({});
 
-  const [grantNick, setGrantNick] = useState("");
-  const [granting, setGranting] = useState(false);
-  const [grantError, setGrantError] = useState("");
-  const [grantMsg, setGrantMsg] = useState("");
-  const [loadError, setLoadError] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError("");
-    try {
-      const snap = await getDocs(collection(db, "users"));
-      const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      recs.sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
-      setUsers(recs);
-
-      // Pone al día el directorio público para cuentas que se registraron
-      // antes de que existiera esta sección (no bloquea la carga del panel).
-      recs.forEach((u) => {
-        syncDirectory(u.id, { nick: u.nick || "", ranks: userRanks(u), status: u.status || "survey-pending" });
-      });
-      const groupsSnap = await getDocs(collection(db, "groups"));
-      setGroups(groupsSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      const adminsSnap = await getDocs(collection(db, "admins"));
-      setAdminUids(adminsSnap.docs.map((d) => d.id));
-    } catch (e) {
-      setLoadError(e?.message || "No se pudo cargar la información del panel.");
-    }
-    setLoading(false);
+  useEffect(() => {
+    const q = query(collection(db, "directory"));
+    const unsub = onSnapshot(q, (snap) => {
+      setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.role === "lider"));
+      setLoading(false);
+    }, () => setLoading(false));
+    return unsub;
   }, []);
 
-  useEffect(() => { load(); }, [load]);
-
-  const decide = async (user, status, ranks) => {
-    const finalRanks = ranks || userRanks(user);
-    await updateDoc(doc(db, "users", user.id), { status, ranks: finalRanks });
-    await syncDirectory(user.id, { status, ranks: finalRanks });
-    load();
-  };
-
-  const saveGroup = async (group) => {
-    const id = group.id || `g_${Date.now()}`;
-    await setDoc(doc(db, "groups", id), {
-      name: group.name.trim(),
-      description: group.description?.trim() || "",
-      link: group.link.trim(),
-      ranks: group.ranks || [],
-      order: group.order ?? Date.now(),
-    });
-    await load();
-  };
-
-  const deleteGroup = async (id) => {
-    const sure = window.confirm("¿Eliminar este grupo?");
-    if (!sure) return;
-    await deleteDoc(doc(db, "groups", id));
-    await load();
-  };
-
-  const grantAdmin = async () => {
-    setGrantError("");
-    setGrantMsg("");
-    const nickLower = grantNick.trim().toLowerCase();
-    if (!nickLower) {
-      setGrantError("Escribe el nick de la persona.");
-      return;
-    }
-    setGranting(true);
-    try {
-      const nameSnap = await getDoc(doc(db, "usernames", nickLower));
-      if (!nameSnap.exists()) {
-        setGrantError("No existe ningún usuario registrado con ese nick.");
-        setGranting(false);
-        return;
-      }
-      const { uid } = nameSnap.data();
-      if (adminUids.includes(uid)) {
-        setGrantError("Esa persona ya es administrador.");
-        setGranting(false);
-        return;
-      }
-      await setDoc(doc(db, "admins", uid), { grantedAt: Date.now(), grantedBy: currentUid });
-      setGrantMsg(`Listo: "${grantNick.trim()}" ahora es administrador.`);
-      setGrantNick("");
-      await load();
-    } catch (e) {
-      setGrantError("No se pudo otorgar el acceso. Intenta de nuevo.");
-    }
-    setGranting(false);
-  };
-
-  const revokeAdmin = async (uid) => {
-    if (uid === currentUid) {
-      const sure = window.confirm("¿Seguro que quieres quitarte tu propio acceso de administrador?");
-      if (!sure) return;
-    }
-    await deleteDoc(doc(db, "admins", uid));
-    await load();
-  };
-
-  const solicitudes = users.filter((u) => u.status === "submitted");
-  const resueltas = users.filter((u) => u.status === "accepted" || u.status === "rejected");
-  const admins = adminUids.map((uid) => ({ uid, user: users.find((u) => u.id === uid) || null }));
+  useEffect(() => {
+    (async () => {
+      const snap = await getDocs(collection(db, "communities"));
+      const map = {};
+      snap.docs.forEach((d) => { map[d.id] = d.data().name; });
+      setCommunities(map);
+    })();
+  }, []);
 
   return (
-    <Shell>
-      <div className="w-full max-w-2xl overflow-x-hidden">
-        <div className="flex items-center justify-between gap-2 mb-4">
-          <div className="flex-1 min-w-0 overflow-x-auto -mx-1 px-1">
-            <div className="flex bg-[#1D1F2A] rounded-lg p-1 gap-1 w-max">
-              <button onClick={() => setTab("solicitudes")} className={cx("shrink-0 whitespace-nowrap text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "solicitudes" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
-                <ClipboardList size={14} /> Solicitudes
-              </button>
-              <button onClick={() => setTab("enlaces")} className={cx("shrink-0 whitespace-nowrap text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "enlaces" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
-                <Settings size={14} /> Grupos
-              </button>
-              <button onClick={() => setTab("admins")} className={cx("shrink-0 whitespace-nowrap text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "admins" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
-                <Shield size={14} /> Admins
-              </button>
-            </div>
-          </div>
-          <button onClick={onExit} className="shrink-0 flex items-center gap-1 text-xs text-[#96939F] hover:text-[#F2F0EB] border border-[#2A2C38] rounded-lg px-2.5 py-2">
-            <X size={14} /> Salir
-          </button>
-        </div>
-
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-[#96939F]">
-            <Loader2 size={14} className="animate-spin" /> Cargando…
-          </div>
-        )}
-
-        {!loading && loadError && (
-          <div className="bg-[#16171F] border border-[#E07A7A]/40 rounded-2xl p-6">
-            <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-3">
-              <AlertCircle size={15} /> No se pudo cargar el panel
-            </div>
-            <p className="text-xs text-[#96939F] mb-4 break-words">{loadError}</p>
-            <PrimaryButton onClick={load}>Reintentar</PrimaryButton>
-          </div>
-        )}
-
-        {!loading && !loadError && tab === "solicitudes" && (
-          <div className="space-y-4">
-            <div>
-              <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Pendientes ({solicitudes.length})</div>
-              {solicitudes.length === 0 && <div className="text-sm text-[#5B5866]">No hay solicitudes en revisión.</div>}
-              <div className="space-y-3">
-                {solicitudes.map((u) => <SolicitudCard key={u.id} user={u} onDecide={decide} />)}
-              </div>
-            </div>
-
-            {resueltas.length > 0 && (
+    <div>
+      <TopBar title="Líderes" />
+      <p className="text-xs text-[#5B5866] mb-4">Autoridad máxima de todo el proyecto Argyra.</p>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
+      ) : people.length === 0 ? (
+        <EmptyState text="Sin líderes registrados todavía." />
+      ) : (
+        people.map((p) => (
+          <SectionCard key={p.uid}>
+            <div className="flex items-center gap-3">
+              <Crown size={20} style={{ color: "#C9A036" }} />
               <div>
-                <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2 mt-6">Resueltas</div>
-                <div className="space-y-2">
-                  {resueltas.map((u) => (
-                    <ResueltaRow key={u.id} user={u} onSaveRanks={(ranks) => decide(u, u.status, ranks)} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {!loading && !loadError && tab === "enlaces" && (
-          <GroupsManager groups={groups} onSave={saveGroup} onDelete={deleteGroup} />
-        )}
-
-        {!loading && !loadError && tab === "admins" && (
-          <div className="space-y-5">
-            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
-              <div className="text-sm font-medium mb-1">Otorgar acceso de administrador</div>
-              <p className="text-xs text-[#96939F] mb-4">
-                Escribe el nick de un usuario ya registrado para darle acceso al panel.
-              </p>
-              <Field
-                icon={UserIcon}
-                label="Nick del usuario"
-                placeholder="ejemplo: mariposa"
-                value={grantNick}
-                onChange={(e) => setGrantNick(e.target.value)}
-                error={grantError}
-                hint={grantMsg || undefined}
-              />
-              <PrimaryButton onClick={grantAdmin} disabled={granting}>
-                {granting ? <Loader2 size={16} className="animate-spin" /> : "Otorgar admin"}
-              </PrimaryButton>
-            </div>
-
-            <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
-              <div className="text-sm font-medium mb-3">Administradores actuales ({admins.length})</div>
-              <div className="space-y-2">
-                {admins.map(({ uid, user: u }) => (
-                  <div key={uid} className="flex items-center justify-between bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
-                    <div>
-                      <div>{u?.nick || "Usuario desconocido"}</div>
-                      {u?.email && <div className="text-xs text-[#5B5866]">{u.email}</div>}
-                    </div>
-                    <button
-                      onClick={() => revokeAdmin(uid)}
-                      className="flex items-center gap-1.5 text-xs text-[#E07A7A] hover:bg-[#E07A7A]/15 border border-[#E07A7A]/40 rounded-lg px-2.5 py-1.5"
-                    >
-                      <XCircle size={13} /> Quitar
-                    </button>
-                  </div>
-                ))}
+                <div className="font-semibold text-sm">{p.nick}</div>
+                <div className="text-xs text-[#96939F]">{p.communityId ? communities[p.communityId] || "Comunidad" : "Equipo directo de Argyra"}</div>
               </div>
             </div>
-          </div>
-        )}
-      </div>
-    </Shell>
+          </SectionCard>
+        ))
+      )}
+    </div>
   );
 }
 
-function GroupsManager({ groups, onSave, onDelete }) {
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [link, setLink] = useState("");
-  const [ranks, setRanks] = useState([]);
-  const [saving, setSaving] = useState(false);
+/* ---------------- Sistema de pase: solicitar Coordinador ---------------- */
 
-  const resetForm = () => {
-    setEditingId(null); setName(""); setDescription(""); setLink(""); setRanks([]); setShowForm(false);
-  };
+function PaseScreen({ record, uid }) {
+  const [branch, setBranch] = useState("");
+  const [motivation, setMotivation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [myRequests, setMyRequests] = useState([]);
 
-  const editGroup = (g) => {
-    setEditingId(g.id); setName(g.name); setDescription(g.description || ""); setLink(g.link || ""); setRanks(g.ranks || []);
-    setShowForm(true);
-  };
+  useEffect(() => {
+    const q = query(collection(db, "passRequests"), where("uid", "==", uid));
+    const unsub = onSnapshot(q, (snap) => setMyRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => {});
+    return unsub;
+  }, [uid]);
 
-  const save = async () => {
-    if (!name.trim() || !link.trim()) return;
-    setSaving(true);
-    await onSave({ id: editingId, name, description, link, ranks });
-    setSaving(false);
-    resetForm();
+  const hasPending = myRequests.some((r) => r.status === "pending");
+  const alreadyCoordinatorOrLeader = record.role === "coordinador" || record.role === "lider";
+
+  const submit = async () => {
+    setError("");
+    if (!branch) { setError("Elige la rama que quieres coordinar."); return; }
+    if (!motivation.trim()) { setError("Cuéntanos por qué quieres el pase."); return; }
+    setBusy(true);
+    try {
+      await addDoc(collection(db, "passRequests"), {
+        uid, name: record.nick, branchRequested: branch, motivation: motivation.trim(),
+        status: "pending", reviewedBy: null, createdAt: Date.now(),
+      });
+      setBranch(""); setMotivation("");
+    } catch (e) { setError(firebaseErrorToMessage(e)); }
+    setBusy(false);
   };
 
   return (
-    <div className="space-y-5">
-      <p className="text-xs text-[#96939F]">
-        Crea grupos por función o proyecto (ej. "Grupo de Programación") y elige qué rangos tienen acceso.
-        Si no marcas ningún rango, el grupo queda visible para todos los miembros aceptados.
-      </p>
+    <div>
+      <TopBar title="Sistema de pase" />
+      <p className="text-xs text-[#5B5866] mb-4">Formulario para validar tu liderazgo antes de entrar como Coordinador de una rama.</p>
 
-      {!showForm ? (
-        <button
-          onClick={() => setShowForm(true)}
-          className="w-full flex items-center justify-center gap-2 border border-dashed border-[#2A2C38] hover:border-[#6C6CF0] rounded-xl py-3 text-sm text-[#96939F] hover:text-[#6C6CF0] transition-colors"
-        >
-          <Plus size={15} /> Nuevo grupo
-        </button>
+      {alreadyCoordinatorOrLeader ? (
+        <SectionCard><div className="text-sm text-[#4E9A6B] flex items-center gap-2"><CheckCircle2 size={16} /> Ya tienes un rol de Coordinador o Líder.</div></SectionCard>
+      ) : hasPending ? (
+        <SectionCard><div className="text-sm text-[#C9A036] flex items-center gap-2"><Loader2 size={16} /> Tu pase está en revisión.</div></SectionCard>
       ) : (
-        <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5 space-y-1">
-          <Field label="Nombre del grupo" placeholder="Grupo de Programación" value={name} onChange={(e) => setName(e.target.value)} />
-          <Field label="Descripción (opcional)" placeholder="Herramientas y desarrollo" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <Field label="Enlace" placeholder="https://chat.whatsapp.com/..." value={link} onChange={(e) => setLink(e.target.value)} />
+        <SectionCard title="Solicitar pase" icon={Stamp}>
           <div className="mb-4">
-            <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Rangos con acceso (vacío = todos)</span>
-            <RankPicker value={ranks} onChange={setRanks} />
+            <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Rama que quieres coordinar</span>
+            <div className="grid grid-cols-1 gap-2">
+              {BRANCH_ORDER.map((bk) => {
+                const b = BRANCHES[bk];
+                const active = branch === bk;
+                return (
+                  <button key={bk} onClick={() => setBranch(bk)} className={cx("text-left text-sm px-3 py-2 rounded-lg border flex items-center gap-2", active ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>
+                    <b.icon size={15} style={{ color: b.color }} /> {b.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div className="flex gap-2">
-            <PrimaryButton onClick={save} disabled={saving || !name.trim() || !link.trim()}>
-              {saving ? <Loader2 size={16} className="animate-spin" /> : editingId ? "Guardar cambios" : "Crear grupo"}
-            </PrimaryButton>
-            <button onClick={resetForm} className="px-4 text-sm text-[#96939F] hover:text-[#F2F0EB]">Cancelar</button>
-          </div>
-        </div>
+          <TextArea label="Motivación" value={motivation} onChange={(e) => setMotivation(e.target.value)} placeholder="¿Por qué deberías coordinar esta rama?" />
+          {error && <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-4"><AlertCircle size={14} /> {error}</div>}
+          <PrimaryButton onClick={submit} disabled={busy}>{busy ? <Loader2 size={16} className="animate-spin" /> : "Enviar pase"}</PrimaryButton>
+        </SectionCard>
       )}
 
-      <div className="space-y-2">
-        {groups.length === 0 && <div className="text-sm text-[#5B5866]">Todavía no hay grupos creados.</div>}
-        {groups.map((g) => (
-          <div key={g.id} className="bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-sm font-medium truncate">{g.name}</div>
-                {g.description && <div className="text-xs text-[#96939F]">{g.description}</div>}
-                <div className="flex flex-wrap gap-1 mt-1.5">
-                  {(!g.ranks || g.ranks.length === 0) && (
-                    <span className="text-[10px] uppercase px-2 py-0.5 rounded-full border border-[#2A2C38] text-[#96939F]">Todos</span>
-                  )}
-                  {(g.ranks || []).map((rk) => (
-                    <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: RANKS[rk].color, borderColor: RANKS[rk].color }}>
-                      {RANKS[rk].label}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button onClick={() => editGroup(g)} className="text-xs text-[#6C6CF0] hover:underline">Editar</button>
-                <button onClick={() => onDelete(g.id)} className="text-[#5B5866] hover:text-[#E07A7A]">
-                  <Trash2 size={14} />
-                </button>
-              </div>
+      {myRequests.filter((r) => r.status !== "pending").length > 0 && (
+        <SectionCard title="Historial" icon={ClipboardList}>
+          {myRequests.filter((r) => r.status !== "pending").map((r) => (
+            <div key={r.id} className="flex items-center justify-between text-sm py-1.5 border-b border-[#2A2C38] last:border-0">
+              <span>{BRANCHES[r.branchRequested]?.label}</span>
+              {r.status === "approved" ? <span className="text-[#4E9A6B] text-xs">Aprobado</span> : <span className="text-[#E07A7A] text-xs">Rechazado</span>}
             </div>
+          ))}
+        </SectionCard>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Admin: gestión de comunidades ---------------- */
+
+function CommunityForm({ initial, onSave, onCancel, people }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [kind, setKind] = useState(initial?.kind || "comunidad");
+  const [subsText, setSubsText] = useState((initial?.subcommunities || []).join(", "));
+  const [leaderUid, setLeaderUid] = useState(initial?.leaderUid || "");
+  const [ambassadorMainUid, setAmbassadorMainUid] = useState(initial?.ambassadorMainUid || "");
+  const [ambassadorAltUid, setAmbassadorAltUid] = useState(initial?.ambassadorAltUid || "");
+  const [sealDate, setSealDate] = useState(initial?.sealDate ? String(initial.sealDate).slice(0, 10) : "");
+  const [status, setStatus] = useState(initial?.status || "activa");
+  const [notes, setNotes] = useState(initial?.notes || "");
+
+  const findPerson = (uid) => people.find((p) => p.uid === uid);
+
+  const save = () => {
+    if (!name.trim()) return;
+    const leader = findPerson(leaderUid);
+    const ambMain = findPerson(ambassadorMainUid);
+    const ambAlt = findPerson(ambassadorAltUid);
+    onSave({
+      name: name.trim(),
+      kind,
+      subcommunities: kind === "comunidad" ? subsText.split(",").map((s) => s.trim()).filter(Boolean) : [],
+      leaderUid: leaderUid || null,
+      leaderName: leader?.nick || "",
+      leaderPhone: leader?.phone || "",
+      ambassadorMainUid: ambassadorMainUid || null,
+      ambassadorMainName: ambMain?.nick || "",
+      ambassadorAltUid: ambassadorAltUid || null,
+      ambassadorAltName: ambAlt?.nick || "",
+      sealDate: sealDate || null,
+      status,
+      notes: notes.trim(),
+    });
+  };
+
+  return (
+    <SectionCard title={initial ? "Editar comunidad" : "Nueva comunidad / grupo"} icon={Building2}>
+      <Field label="Nombre" value={name} onChange={(e) => setName(e.target.value)} />
+      <div className="mb-4">
+        <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Tipo</span>
+        <div className="flex gap-2">
+          <button onClick={() => setKind("comunidad")} className={cx("flex-1 text-sm py-2 rounded-lg border", kind === "comunidad" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Comunidad</button>
+          <button onClick={() => setKind("independiente")} className={cx("flex-1 text-sm py-2 rounded-lg border", kind === "independiente" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Grupo independiente</button>
+        </div>
+      </div>
+      {kind === "comunidad" && (
+        <Field label="Subcomunidades (separadas por coma)" value={subsText} onChange={(e) => setSubsText(e.target.value)} placeholder="Alfa, Beta, Gamma" />
+      )}
+      <label className="block mb-4">
+        <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Líder</span>
+        <select value={leaderUid} onChange={(e) => setLeaderUid(e.target.value)} className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB]">
+          <option value="">Sin asignar</option>
+          {people.map((p) => <option key={p.uid} value={p.uid}>{p.nick}</option>)}
+        </select>
+      </label>
+      {kind === "comunidad" && (
+        <>
+          <label className="block mb-4">
+            <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Embajador titular</span>
+            <select value={ambassadorMainUid} onChange={(e) => setAmbassadorMainUid(e.target.value)} className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB]">
+              <option value="">Sin asignar</option>
+              {people.map((p) => <option key={p.uid} value={p.uid}>{p.nick}</option>)}
+            </select>
+          </label>
+          <label className="block mb-4">
+            <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Embajador suplente</span>
+            <select value={ambassadorAltUid} onChange={(e) => setAmbassadorAltUid(e.target.value)} className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB]">
+              <option value="">Sin asignar</option>
+              {people.map((p) => <option key={p.uid} value={p.uid}>{p.nick}</option>)}
+            </select>
+          </label>
+        </>
+      )}
+      <Field label="Fecha del Sello" type="date" value={sealDate} onChange={(e) => setSealDate(e.target.value)} />
+      <div className="mb-4">
+        <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Estado</span>
+        <div className="flex gap-2">
+          <button onClick={() => setStatus("activa")} className={cx("flex-1 text-sm py-2 rounded-lg border", status === "activa" ? "border-[#4E9A6B] bg-[#4E9A6B]/10 text-[#4E9A6B]" : "border-[#2A2C38]")}>Activa</button>
+          <button onClick={() => setStatus("expulsada")} className={cx("flex-1 text-sm py-2 rounded-lg border", status === "expulsada" ? "border-[#E07A7A] bg-[#E07A7A]/10 text-[#E07A7A]" : "border-[#2A2C38]")}>Expulsada</button>
+        </div>
+      </div>
+      <TextArea label="Notas (opcional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <div className="flex gap-2">
+        <GhostButton onClick={onCancel}>Cancelar</GhostButton>
+        <PrimaryButton onClick={save}>Guardar</PrimaryButton>
+      </div>
+    </SectionCard>
+  );
+}
+
+function CommunitiesManager({ people }) {
+  const [communities, setCommunities] = useState([]);
+  const [editing, setEditing] = useState(null); // null | 'new' | community obj
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "communities"), (snap) => setCommunities(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => {});
+    return unsub;
+  }, []);
+
+  const save = async (data) => {
+    if (editing === "new") await addDoc(collection(db, "communities"), { ...data, createdAt: Date.now() });
+    else await updateDoc(doc(db, "communities", editing.id), data);
+    setEditing(null);
+  };
+  const remove = async (id) => { if (confirm("¿Eliminar esta comunidad?")) await deleteDoc(doc(db, "communities", id)); };
+
+  if (editing) return <CommunityForm initial={editing === "new" ? null : editing} onSave={save} onCancel={() => setEditing(null)} people={people} />;
+
+  return (
+    <SectionCard title="Comunidades y grupos" icon={Building2} right={
+      <button onClick={() => setEditing("new")} className="text-[#6C6CF0]"><Plus size={18} /></button>
+    }>
+      {communities.length === 0 ? <EmptyState text="Sin comunidades todavía." /> : communities.map((c) => (
+        <div key={c.id} className="flex items-center justify-between py-2 border-b border-[#2A2C38] last:border-0">
+          <div>
+            <div className="text-sm font-medium">{c.name}</div>
+            <div className="text-xs text-[#96939F]">{c.kind} · {c.leaderName || "sin líder"}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <StatusPill status={c.status} />
+            <button onClick={() => setEditing(c)} className="text-[#6C6CF0] text-xs">Editar</button>
+            <button onClick={() => remove(c.id)} className="text-[#E07A7A]"><Trash2 size={14} /></button>
+          </div>
+        </div>
+      ))}
+    </SectionCard>
+  );
+}
+
+/* ---------------- Admin: gestión de personas ---------------- */
+
+function PersonRow({ user, communities }) {
+  const [role, setRole] = useState(user.role || "nuevo");
+  const [branches, setBranches] = useState(user.branches || []);
+  const [communityId, setCommunityId] = useState(user.communityId || "");
+  const [sealActive, setSealActive] = useState(user.sello?.active ?? false);
+
+  const toggleBranch = (b) => setBranches((bs) => bs.includes(b) ? bs.filter((x) => x !== b) : [...bs, b]);
+
+  const save = async () => {
+    const sello = { active: sealActive, date: sealActive ? (user.sello?.date || new Date().toISOString()) : null };
+    const payload = {
+      role, branches: role === "coordinador" ? branches : [],
+      communityId: communityId || null, sello,
+    };
+    await updateDoc(doc(db, "users", user.uid), payload);
+    await syncDirectory(user.uid, { role: payload.role, branches: payload.branches, communityId: payload.communityId, sello });
+  };
+
+  return (
+    <div className="border-b border-[#2A2C38] last:border-0 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-sm font-medium">{user.nick}</div>
+        <RoleBadge role={role} />
+      </div>
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <select value={role} onChange={(e) => setRole(e.target.value)} className="bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-2 py-1.5 text-xs">
+          {ROLE_ORDER.map((r) => <option key={r} value={r}>{ROLES[r].label}</option>)}
+        </select>
+        <select value={communityId} onChange={(e) => setCommunityId(e.target.value)} className="bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-2 py-1.5 text-xs">
+          <option value="">Sin comunidad (equipo)</option>
+          {communities.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </div>
+      {role === "coordinador" && (
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {BRANCH_ORDER.map((bk) => (
+            <button key={bk} onClick={() => toggleBranch(bk)} className={cx("text-[11px] px-2 py-1 rounded-full border", branches.includes(bk) ? "border-[#6C6CF0] text-[#6C6CF0]" : "border-[#2A2C38] text-[#96939F]")}>
+              {BRANCHES[bk].label}
+            </button>
+          ))}
+        </div>
+      )}
+      <label className="flex items-center gap-2 text-xs mb-2 cursor-pointer">
+        <input type="checkbox" checked={sealActive} onChange={(e) => setSealActive(e.target.checked)} />
+        Sello Argyra activo
+      </label>
+      <PrimaryButton onClick={save} className="py-1.5 text-xs">Guardar</PrimaryButton>
+    </div>
+  );
+}
+
+function PeopleManager({ communities }) {
+  const [people, setPeople] = useState([]);
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, "users")), (snap) => setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.status === "accepted")), () => {});
+    return unsub;
+  }, []);
+  return (
+    <SectionCard title="Personas (rol, comunidad, rama, sello)" icon={Users}>
+      {people.length === 0 ? <EmptyState text="Sin personas aceptadas todavía." /> : people.map((p) => <PersonRow key={p.uid} user={p} communities={communities} />)}
+    </SectionCard>
+  );
+}
+
+/* ---------------- Admin: solicitudes de ingreso ---------------- */
+
+function RequestsManager({ communities }) {
+  const [requests, setRequests] = useState([]);
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, "users")), (snap) => setRequests(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.status === "submitted")), () => {});
+    return unsub;
+  }, []);
+
+  const accept = async (u) => {
+    let communityId = u.communityId || null;
+    let role = "nuevo";
+    if (u.affiliation === "new-community" && u.pendingCommunityName) {
+      const ref = await addDoc(collection(db, "communities"), {
+        name: u.pendingCommunityName, kind: u.pendingCommunityKind || "comunidad",
+        subcommunities: [], leaderUid: u.uid, leaderName: u.nick, leaderPhone: u.phone || "",
+        ambassadorMainUid: null, ambassadorMainName: "", ambassadorAltUid: null, ambassadorAltName: "",
+        sealDate: new Date().toISOString(), status: "activa", notes: "", createdAt: Date.now(),
+      });
+      communityId = ref.id;
+      role = "lider";
+    }
+    const sello = { active: true, date: new Date().toISOString() };
+    await updateDoc(doc(db, "users", u.uid), { status: "accepted", communityId, role, sello });
+    await syncDirectory(u.uid, { status: "accepted", communityId, role, sello, branches: [] });
+  };
+  const reject = async (u) => {
+    await updateDoc(doc(db, "users", u.uid), { status: "rejected" });
+    await syncDirectory(u.uid, { status: "rejected" });
+  };
+
+  return (
+    <SectionCard title="Solicitudes pendientes" icon={ClipboardList}>
+      {requests.length === 0 ? <EmptyState text="Sin solicitudes pendientes." /> : requests.map((u) => (
+        <div key={u.uid} className="border-b border-[#2A2C38] last:border-0 py-3">
+          <div className="text-sm font-medium">{u.nick}</div>
+          <div className="text-xs text-[#96939F] mb-1">
+            {u.affiliation === "community" ? `Comunidad: ${communities.find((c) => c.id === u.communityId)?.name || "—"}`
+              : u.affiliation === "new-community" ? `Nueva comunidad/grupo: ${u.pendingCommunityName} (${u.pendingCommunityKind})`
+              : "Equipo directo de Argyra"}
+          </div>
+          {u.motivation && <div className="text-xs text-[#5B5866] italic mb-2">"{u.motivation}"</div>}
+          <div className="flex gap-2">
+            <button onClick={() => accept(u)} className="flex-1 text-xs py-1.5 rounded-lg bg-[#4E9A6B] text-white flex items-center justify-center gap-1"><CheckCircle2 size={13} /> Aceptar</button>
+            <button onClick={() => reject(u)} className="flex-1 text-xs py-1.5 rounded-lg border border-[#E07A7A] text-[#E07A7A] flex items-center justify-center gap-1"><XCircle size={13} /> Rechazar</button>
+          </div>
+        </div>
+      ))}
+    </SectionCard>
+  );
+}
+
+/* ---------------- Admin: pases (Coordinador) ---------------- */
+
+function PassesManager() {
+  const [requests, setRequests] = useState([]);
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, "passRequests"), where("status", "==", "pending")), (snap) => setRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => {});
+    return unsub;
+  }, []);
+
+  const approve = async (r) => {
+    await updateDoc(doc(db, "passRequests", r.id), { status: "approved" });
+    const uSnap = await getDoc(doc(db, "users", r.uid));
+    const current = uSnap.exists() ? uSnap.data() : {};
+    const branches = Array.from(new Set([...(current.branches || []), r.branchRequested]));
+    await updateDoc(doc(db, "users", r.uid), { role: "coordinador", branches });
+    await syncDirectory(r.uid, { role: "coordinador", branches });
+  };
+  const reject = async (r) => { await updateDoc(doc(db, "passRequests", r.id), { status: "rejected" }); };
+
+  return (
+    <SectionCard title="Pases pendientes (Coordinador)" icon={Stamp}>
+      {requests.length === 0 ? <EmptyState text="Sin pases pendientes." /> : requests.map((r) => (
+        <div key={r.id} className="border-b border-[#2A2C38] last:border-0 py-3">
+          <div className="text-sm font-medium">{r.name} · {BRANCHES[r.branchRequested]?.label}</div>
+          <div className="text-xs text-[#5B5866] italic mb-2">"{r.motivation}"</div>
+          <div className="flex gap-2">
+            <button onClick={() => approve(r)} className="flex-1 text-xs py-1.5 rounded-lg bg-[#4E9A6B] text-white flex items-center justify-center gap-1"><CheckCircle2 size={13} /> Aprobar</button>
+            <button onClick={() => reject(r)} className="flex-1 text-xs py-1.5 rounded-lg border border-[#E07A7A] text-[#E07A7A] flex items-center justify-center gap-1"><XCircle size={13} /> Rechazar</button>
+          </div>
+        </div>
+      ))}
+    </SectionCard>
+  );
+}
+
+/* ---------------- Admin: administradores ---------------- */
+
+function AdminsManager({ currentUid, isSuperAdmin }) {
+  const [admins, setAdmins] = useState([]);
+  const [nick, setNick] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "admins"), (snap) => setAdmins(snap.docs.map((d) => d.id)), () => {});
+    return unsub;
+  }, []);
+
+  const grant = async () => {
+    setError("");
+    const nameSnap = await getDoc(doc(db, "usernames", nick.trim().toLowerCase()));
+    if (!nameSnap.exists()) { setError("No existe ese nick."); return; }
+    const { uid } = nameSnap.data();
+    await setDoc(doc(db, "admins", uid), { grantedAt: Date.now(), grantedBy: currentUid });
+    setNick("");
+  };
+  const revoke = async (uid) => { await deleteDoc(doc(db, "admins", uid)); };
+
+  return (
+    <SectionCard title="Administradores" icon={Shield}>
+      <div className="flex gap-2 mb-3">
+        <input value={nick} onChange={(e) => setNick(e.target.value)} placeholder="nick" className="flex-1 bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2 text-sm" />
+        <button onClick={grant} className="bg-[#6C6CF0] text-white text-xs px-3 rounded-lg">Otorgar</button>
+      </div>
+      {error && <div className="text-xs text-[#E07A7A] mb-2">{error}</div>}
+      <div className="space-y-1">
+        {admins.map((uid) => (
+          <div key={uid} className="flex items-center justify-between text-xs py-1">
+            <span className="text-[#96939F]">{uid}</span>
+            {uid !== currentUid && <button onClick={() => revoke(uid)} className="text-[#E07A7A]"><Trash2 size={13} /></button>}
           </div>
         ))}
       </div>
-    </div>
+    </SectionCard>
   );
 }
 
-function ResueltaRow({ user, onSaveRanks }) {
-  const [editing, setEditing] = useState(false);
-  const [ranks, setRanks] = useState(userRanks(user));
-  const [saving, setSaving] = useState(false);
+/* ---------------- Panel de Admin ---------------- */
 
-  const save = async () => {
-    setSaving(true);
-    await onSaveRanks(ranks);
-    setSaving(false);
-    setEditing(false);
-  };
+function AdminPanel({ onExit, currentUid, isSuperAdmin }) {
+  const [section, setSection] = useState("requests");
+  const [communities, setCommunities] = useState([]);
+  const [people, setPeople] = useState([]);
 
-  const myRanks = userRanks(user);
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "communities"), (snap) => setCommunities(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => {});
+    return unsub;
+  }, []);
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, "users")), (snap) => setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.status === "accepted")), () => {});
+    return unsub;
+  }, []);
+
+  const sections = [
+    { key: "requests", label: "Solicitudes", icon: ClipboardList },
+    { key: "communities", label: "Comunidades", icon: Building2 },
+    { key: "people", label: "Personas", icon: Users },
+    { key: "passes", label: "Pases", icon: Stamp },
+    { key: "admins", label: "Admins", icon: Shield },
+  ];
 
   return (
-    <div className="bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate">{user.nick}</span>
-        <div className="flex items-center gap-2 shrink-0">
-          {!editing && (
-            <div className="flex flex-wrap gap-1 justify-end">
-              {myRanks.map((rk) => (
-                <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: RANKS[rk].color, borderColor: RANKS[rk].color }}>
-                  {RANKS[rk].label}
-                </span>
-              ))}
-            </div>
-          )}
-          <StatusBadge status={user.status} />
-          {user.status === "accepted" && !editing && (
-            <button onClick={() => setEditing(true)} className="text-[11px] text-[#6C6CF0] hover:underline shrink-0">
-              Cambiar rango
+    <Shell wide>
+      <div className="w-full pb-4">
+        <TopBar title="Panel de administración" onBack={onExit} />
+        <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+          {sections.map((s) => (
+            <button key={s.key} onClick={() => setSection(s.key)}
+              className={cx("flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border whitespace-nowrap", section === s.key ? "border-[#6C6CF0] text-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38] text-[#96939F]")}>
+              <s.icon size={13} /> {s.label}
             </button>
-          )}
+          ))}
         </div>
+        {section === "requests" && <RequestsManager communities={communities} />}
+        {section === "communities" && <CommunitiesManager people={people} />}
+        {section === "people" && <PeopleManager communities={communities} />}
+        {section === "passes" && <PassesManager />}
+        {section === "admins" && <AdminsManager currentUid={currentUid} isSuperAdmin={isSuperAdmin} />}
       </div>
-      {editing && (
-        <div className="mt-2.5 pt-2.5 border-t border-[#2A2C38] space-y-2.5">
-          <RankPicker value={ranks} onChange={setRanks} />
-          <div className="flex items-center gap-2">
-            <button onClick={save} disabled={saving} className="flex items-center gap-1.5 bg-[#4E9A6B]/15 text-[#4E9A6B] border border-[#4E9A6B]/40 rounded-lg px-3 py-2 text-xs hover:bg-[#4E9A6B]/25 disabled:opacity-50">
-              {saving ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Guardar
-            </button>
-            <button onClick={() => { setEditing(false); setRanks(userRanks(user)); }} className="text-xs text-[#96939F] px-2 py-2">
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SolicitudCard({ user, onDecide }) {
-  const [ranks, setRanks] = useState(userRanks(user).length ? userRanks(user) : (user.answers?.tareas || []));
-  return (
-    <div className="bg-[#16171F] border border-[#2A2C38] rounded-xl p-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="font-medium">{user.nick}</span>
-        <StatusBadge status={user.status} />
-      </div>
-      <div className="text-xs text-[#96939F] space-y-0.5 mb-3">
-        <div>Tel: {user.phone}</div>
-        <div>Correo: {user.email}</div>
-        <div>Experiencia previa: {user.answers?.experiencia || "—"}</div>
-        <div>Se postula a: {(user.answers?.tareas || []).map((k) => RANKS[k].label).join(", ") || "—"}</div>
-        {user.answers?.tareasDetalle && Object.keys(user.answers.tareasDetalle).length > 0 && (
-          <div className="mt-1 space-y-0.5">
-            {Object.entries(user.answers.tareasDetalle).map(([k, items]) => (
-              items?.length > 0 && (
-                <div key={k}>
-                  <span style={{ color: RANKS[k]?.color }}>{RANKS[k]?.label}:</span> {items.join("; ")}
-                </div>
-              )
-            ))}
-          </div>
-        )}
-      </div>
-      <div className="mb-3">
-        <span className="block text-[10px] uppercase tracking-wide text-[#96939F] mb-1.5">Rango(s) a otorgar</span>
-        <RankPicker value={ranks} onChange={setRanks} />
-      </div>
-      <div className="flex items-center gap-2">
-        <button onClick={() => onDecide(user, "accepted", ranks)} className="flex items-center gap-1.5 bg-[#4E9A6B]/15 text-[#4E9A6B] border border-[#4E9A6B]/40 rounded-lg px-3 py-2 text-sm hover:bg-[#4E9A6B]/25">
-          <CheckCircle2 size={14} /> Aceptar
-        </button>
-        <button onClick={() => onDecide(user, "rejected", [])} className="flex items-center gap-1.5 bg-[#E07A7A]/15 text-[#E07A7A] border border-[#E07A7A]/40 rounded-lg px-3 py-2 text-sm hover:bg-[#E07A7A]/25">
-          <XCircle size={14} /> Rechazar
-        </button>
-      </div>
-    </div>
+    </Shell>
   );
 }
 
 function NoAdminAccess({ onExit }) {
   return (
     <Shell>
-      <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6 text-center">
-        <Shield size={24} className="mx-auto mb-3 text-[#96939F]" />
-        <h2 className="text-lg font-semibold mb-1">Sin acceso de administrador</h2>
-        <p className="text-sm text-[#96939F] mb-4">
-          Tu cuenta no está en la lista de administradores del Consejo Coordinador.
-        </p>
-        <button onClick={onExit} className="text-sm text-[#6C6CF0]">Volver</button>
-      </div>
+      <SectionCard>
+        <div className="text-sm text-[#E07A7A] mb-3">No tienes acceso de administrador.</div>
+        <GhostButton onClick={onExit}>Volver</GhostButton>
+      </SectionCard>
     </Shell>
   );
 }
 
-/* ---------------- Root ---------------- */
+/* ---------------- App raíz ---------------- */
 
 export default function App() {
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState(null); // firebase auth user
-  const [record, setRecord] = useState(null); // Firestore users/{uid}
+  const [user, setUser] = useState(null);
+  const [record, setRecord] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [tab, setTab] = useState("home");
+  const [community, setCommunity] = useState(null);
+  const [communities, setCommunities] = useState([]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
@@ -2005,34 +1650,18 @@ export default function App() {
         const data = snap.exists() ? snap.data() : null;
         setRecord(data);
 
-        // "indrhack" es el administrador principal fijo. Si todavía no
-        // tiene el rol de admin, se lo asigna a sí mismo automáticamente
-        // al entrar (las reglas de Firestore solo permiten esto para ese
-        // nick exacto — ver firestore.rules).
         if (data?.nick && data.nick.trim().toLowerCase() === "indrhack") {
           try {
             const adminSnap = await getDoc(doc(db, "admins", fbUser.uid));
             if (!adminSnap.exists()) {
-              await setDoc(doc(db, "admins", fbUser.uid), {
-                grantedAt: Date.now(),
-                grantedBy: "bootstrap",
-              });
+              await setDoc(doc(db, "admins", fbUser.uid), { grantedAt: Date.now(), grantedBy: "bootstrap" });
             }
-          } catch (e) {
-            // Si las reglas de Firestore aún no están actualizadas en la
-            // consola, esto simplemente no hace nada por ahora; se puede
-            // volver a intentar en el siguiente inicio de sesión.
-          }
+          } catch (e) {}
         }
-
-        // Cada quien que inicia sesión (indrhack u otro admin que él haya
-        // otorgado) ve automáticamente su opción de Admin integrada.
         try {
           const adminSnap = await getDoc(doc(db, "admins", fbUser.uid));
           setIsAdmin(adminSnap.exists());
-        } catch (e) {
-          setIsAdmin(false);
-        }
+        } catch (e) { setIsAdmin(false); }
       } else {
         setRecord(null);
         setIsAdmin(false);
@@ -2042,16 +1671,26 @@ export default function App() {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "communities"), (snap) => setCommunities(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => {});
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (record?.communityId) {
+      getDoc(doc(db, "communities", record.communityId)).then((s) => setCommunity(s.exists() ? { id: s.id, ...s.data() } : null));
+    } else {
+      setCommunity(null);
+    }
+  }, [record?.communityId]);
+
   const refresh = useCallback(async () => {
     if (!user) return;
     const snap = await getDoc(doc(db, "users", user.uid));
     setRecord(snap.exists() ? snap.data() : null);
   }, [user]);
 
-  const logout = async () => {
-    await signOut(auth);
-    setTab("home");
-  };
+  const logout = async () => { await signOut(auth); setTab("home"); };
 
   if (loading) {
     return (
@@ -2063,36 +1702,48 @@ export default function App() {
     );
   }
 
-  // Antes de tener cuenta o de terminar el registro (encuesta / términos),
-  // se mantiene el flujo de onboarding tal cual, sin la navegación principal.
-  if (!user || !record) {
-    return <AuthScreen />;
+  if (!user || !record) return <AuthScreen />;
+  if (record.status === "survey-pending") return <IngresoScreen uid={user.uid} onDone={refresh} />;
+  if (record.status === "terms-pending") return <TermsScreen uid={user.uid} onSubmitted={refresh} />;
+  if (record.status === "submitted") {
+    return (
+      <Shell>
+        <SectionCard>
+          <div className="flex items-center gap-2 text-sm text-[#C9A036] mb-2"><Loader2 size={16} /> Solicitud en revisión</div>
+          <p className="text-xs text-[#96939F]">Un administrador revisará tu solicitud pronto.</p>
+        </SectionCard>
+        <GhostButton onClick={logout}><LogOut size={16} /> Cerrar sesión</GhostButton>
+      </Shell>
+    );
   }
-  if (record.status === "survey-pending") {
-    return <SurveyScreen uid={user.uid} onDone={refresh} />;
-  }
-  if (record.status === "terms-pending") {
-    return <TermsScreen uid={user.uid} onSubmitted={refresh} />;
+  if (record.status === "rejected") {
+    return (
+      <Shell>
+        <SectionCard>
+          <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-2"><XCircle size={16} /> Solicitud no aceptada</div>
+        </SectionCard>
+        <GhostButton onClick={logout}><LogOut size={16} /> Cerrar sesión</GhostButton>
+      </Shell>
+    );
   }
 
-  // Ya con cuenta activa: al iniciar sesión, la persona entra directo a
-  // una página de contenido (Inicio) con navegación integrada, incluyendo
-  // el panel de administración para quien tenga ese acceso.
   const isSuperAdmin = record.nick && record.nick.trim().toLowerCase() === "indrhack";
 
-  if (tab === "admin" && isAdmin) {
+  if (tab === "admin") {
+    if (!isAdmin) return <NoAdminAccess onExit={() => setTab("home")} />;
     return <AdminPanel onExit={() => setTab("home")} currentUid={user.uid} isSuperAdmin={isSuperAdmin} />;
   }
 
   let body;
-  if (tab === "directory") body = <DirectoryScreen canView={record.status === "accepted" || isAdmin} myRanks={userRanks(record)} isAdmin={isAdmin} />;
-  else if (tab === "leaders") body = <LeadersScreen isSuperAdmin={isSuperAdmin} />;
-  else if (tab === "profile") body = <ProfileScreen record={record} uid={user.uid} onLogout={logout} onSaved={refresh} />;
-  else body = <HomeFeed isAdmin={isAdmin} />;
+  if (tab === "communities") body = <CommunitiesScreen record={record} isAdmin={isAdmin} />;
+  else if (tab === "team") body = <TeamScreen />;
+  else if (tab === "leaders") body = <LeadersScreen />;
+  else if (tab === "profile") body = <ProfileScreen record={record} uid={user.uid} onLogout={logout} onSaved={refresh} community={community} />;
+  else body = <DirectorioCentralScreen isAdmin={isAdmin} record={record} communities={communities} />;
 
   return (
-    <Shell>
-      <div className="w-full max-w-md pb-16">{body}</div>
+    <Shell wide={tab === "communities"}>
+      <div className="w-full pb-16">{body}</div>
       <BottomNav tab={tab} setTab={setTab} isAdmin={isAdmin} />
     </Shell>
   );
