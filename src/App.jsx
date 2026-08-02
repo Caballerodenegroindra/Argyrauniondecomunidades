@@ -23,6 +23,13 @@ import argyraLogo from "./assets/argyra-logo.png";
 --------------------------------------------------------- */
 
 const RANKS = {
+  lider: {
+    key: "lider",
+    label: "Líder",
+    title: "Liderazgo y coordinación general",
+    color: "#8E5FD6",
+    blurb: "Miembros con rol de liderazgo dentro de la comunidad: coordinan y guían más allá de sus tareas diarias, por debajo de la Cúpula y Alto Consejo.",
+  },
   kangu: {
     key: "kangu",
     label: "Kangu",
@@ -53,7 +60,15 @@ const RANKS = {
   },
 };
 
+// RANK_ORDER: rangos "autoasignables" en la encuesta de registro (tienen
+// tareas específicas en SUBTASKS). "Líder" NO está aquí a propósito: es un
+// título honorífico que solo un admin otorga, nadie se lo autoasigna.
 const RANK_ORDER = ["kangu", "domeisha", "taicho", "sinchan"];
+
+// TITLE_ORDER: todos los títulos que un admin puede otorgar a un miembro
+// (incluye "Líder"). Se usa para el selector de rangos en Admin, el orden
+// de la lista de Comunidad y la pantalla "Líderes y rangos".
+const TITLE_ORDER = ["lider", ...RANK_ORDER];
 
 // Tareas específicas de cada rango: al elegir un rango en la encuesta,
 // la persona debe marcar en cuál(es) de estas puede apoyar puntualmente.
@@ -165,7 +180,7 @@ function RankPicker({ value, onChange }) {
   };
   return (
     <div className="flex flex-wrap gap-2">
-      {RANK_ORDER.map((k) => {
+      {TITLE_ORDER.map((k) => {
         const active = value.includes(k);
         return (
           <button
@@ -995,6 +1010,7 @@ function DirectoryScreen({ canView, myRanks, isAdmin }) {
   // registro (users/{uid}.answers), para el buscador y el detalle.
   const [adminExtra, setAdminExtra] = useState({});
   const [filterKey, setFilterKey] = useState(""); // "rankKey||texto de la opción"
+  const [searchText, setSearchText] = useState(""); // búsqueda por nombre o número
   const [selectedMember, setSelectedMember] = useState(null);
 
   useEffect(() => {
@@ -1011,8 +1027,8 @@ function DirectoryScreen({ canView, myRanks, isAdmin }) {
           // Solo se muestran miembros ya registrados y aceptados en la comunidad.
           .filter((m) => m.status === "accepted");
         recs.sort((a, b) => {
-          const ra = userRanks(a).length ? RANK_ORDER.indexOf(userRanks(a)[0]) : 99;
-          const rb = userRanks(b).length ? RANK_ORDER.indexOf(userRanks(b)[0]) : 99;
+          const ra = userRanks(a).length ? TITLE_ORDER.indexOf(userRanks(a)[0]) : 99;
+          const rb = userRanks(b).length ? TITLE_ORDER.indexOf(userRanks(b)[0]) : 99;
           if (ra !== rb) return ra - rb;
           return (a.nick || "").localeCompare(b.nick || "");
         });
@@ -1069,13 +1085,26 @@ function DirectoryScreen({ canView, myRanks, isAdmin }) {
 
   // Filtro de búsqueda por opción marcada en el registro (solo admin).
   const [filterRank, filterText] = filterKey ? filterKey.split("||") : ["", ""];
-  const visibleMembers = !isAdmin || !filterKey
-    ? members
-    : members.filter((m) => {
-        const answers = adminExtra[m.id]?.answers;
-        const list = answers?.tareasDetalle?.[filterRank] || [];
-        return list.includes(filterText);
-      });
+
+  // Búsqueda por nombre (para todos) o número (solo admin, único que ve teléfonos).
+  const searchLower = searchText.trim().toLowerCase();
+  const searchDigits = searchLower.replace(/[^0-9]/g, "");
+  const matchesSearch = (m) => {
+    if (!searchLower) return true;
+    if ((m.nick || "").toLowerCase().includes(searchLower)) return true;
+    if (isAdmin && searchDigits) {
+      const phone = (adminExtra[m.id]?.phone || "").replace(/[^0-9]/g, "");
+      if (phone.includes(searchDigits)) return true;
+    }
+    return false;
+  };
+
+  const visibleMembers = members.filter(matchesSearch).filter((m) => {
+    if (!isAdmin || !filterKey) return true;
+    const answers = adminExtra[m.id]?.answers;
+    const list = answers?.tareasDetalle?.[filterRank] || [];
+    return list.includes(filterText);
+  });
 
   // ---- Vista de detalle de un miembro (solo administradores) ----
   if (isAdmin && selectedMember) {
@@ -1192,7 +1221,24 @@ function DirectoryScreen({ canView, myRanks, isAdmin }) {
           )}
 
           <div className="flex items-center justify-between mb-2">
-            <div className="text-xs uppercase tracking-wide text-[#96939F]">Miembros ({visibleMembers.length}{filterKey ? ` de ${members.length}` : ""})</div>
+            <div className="text-xs uppercase tracking-wide text-[#96939F]">Miembros ({visibleMembers.length}{(filterKey || searchText) ? ` de ${members.length}` : ""})</div>
+          </div>
+
+          <div className="mb-3">
+            <div className="flex items-center gap-2 bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 focus-within:border-[#6C6CF0] transition-colors">
+              <Users size={14} className="text-[#5B5866] shrink-0" />
+              <input
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                placeholder={isAdmin ? "Buscar por nombre o número…" : "Buscar por nombre…"}
+                className="bg-transparent outline-none w-full text-[#F2F0EB] placeholder:text-[#5B5866] text-sm"
+              />
+              {searchText && (
+                <button onClick={() => setSearchText("")} className="text-[#5B5866] hover:text-[#F2F0EB] shrink-0">
+                  <X size={14} />
+                </button>
+              )}
+            </div>
           </div>
 
           {isAdmin && (
@@ -1215,6 +1261,10 @@ function DirectoryScreen({ canView, myRanks, isAdmin }) {
                 <p className="text-xs text-[#5B5866] mt-2">Nadie marcó esta opción en su registro.</p>
               )}
             </div>
+          )}
+
+          {!filterKey && searchText && visibleMembers.length === 0 && (
+            <p className="text-xs text-[#5B5866] mb-3">No se encontró ningún miembro con ese nombre{isAdmin ? " o número" : ""}.</p>
           )}
 
           <div className="space-y-2">
@@ -1473,7 +1523,7 @@ function LeadersScreen({ isSuperAdmin }) {
 
         {!loadingRanks && (
           <div className="space-y-5">
-            {RANK_ORDER.map((rk) => {
+            {TITLE_ORDER.map((rk) => {
               const r = RANKS[rk];
               const membersOfRank = rankMembers.filter((m) => userRanks(m).includes(rk));
               return (
