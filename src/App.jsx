@@ -915,9 +915,91 @@ function DirectorioCentralScreen({ isAdmin, record, communities }) {
   );
 }
 
+/* ---------------- Grupos de miembros (enlaces que cualquiera puede agregar) ---------------- */
+
+function UserGroupsSection({ uid, nick, isAdmin }) {
+  const [groups, setGroups] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [link, setLink] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const q = query(collection(db, "userGroups"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(q, (snap) => {
+      setGroups(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
+    return unsub;
+  }, []);
+
+  const add = async () => {
+    if (!name.trim() || !link.trim()) { setError("Escribe un nombre y un enlace."); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await addDoc(collection(db, "userGroups"), {
+        name: name.trim(), link: link.trim(),
+        ownerUid: uid, ownerNick: nick || "—",
+        createdAt: Date.now(),
+      });
+      setName(""); setLink("");
+    } catch (e) {
+      setError(e?.code === "permission-denied"
+        ? "No tienes permiso para agregar el grupo (revisa las reglas de Firestore para 'userGroups')."
+        : "No se pudo agregar. Intenta de nuevo.");
+    }
+    setSaving(false);
+  };
+
+  const remove = async (id) => {
+    if (!confirm("¿Eliminar este grupo?")) return;
+    try { await deleteDoc(doc(db, "userGroups", id)); } catch (e) {}
+  };
+
+  return (
+    <SectionCard title="Grupos de la comunidad" icon={Users}>
+      <p className="text-xs text-[#96939F] mb-3">Cualquier miembro, tenga rango o no, puede dejar aquí el enlace de un grupo (WhatsApp, Discord, etc.) del que sea admin.</p>
+
+      <Field label="Nombre del grupo" placeholder="Ej: Dynasty Ark Nexus" value={name} onChange={(e) => setName(e.target.value)} />
+      <Field label="Enlace del grupo" placeholder="https://..." value={link} onChange={(e) => setLink(e.target.value)} />
+      {error && <div className="text-[11px] text-[#E07A7A] mb-2">{error}</div>}
+      <PrimaryButton onClick={add} disabled={saving} className="py-1.5 text-xs mb-4">
+        {saving ? <Loader2 size={14} className="animate-spin" /> : "Agregar grupo"}
+      </PrimaryButton>
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-4"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
+      ) : groups.length === 0 ? (
+        <EmptyState text="Todavía nadie agregó un grupo." />
+      ) : (
+        <div className="space-y-2">
+          {groups.map((g) => (
+            <div key={g.id} className="flex items-center justify-between gap-2 border border-[#2A2C38] rounded-lg px-3 py-2">
+              <div className="min-w-0">
+                <div className="text-sm font-medium truncate">{g.name}</div>
+                <a href={g.link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[#6C6CF0]">
+                  <ExternalLink size={12} /> Abrir enlace
+                </a>
+                <div className="text-[11px] text-[#5B5866]">Agregado por {g.ownerNick}</div>
+              </div>
+              {(isAdmin || g.ownerUid === uid) && (
+                <button onClick={() => remove(g.id)} className="shrink-0 text-[#96939F] hover:text-[#E07A7A]">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
 /* ---------------- Comunidades ---------------- */
 
-function CommunitiesScreen({ record, isAdmin }) {
+function CommunitiesScreen({ record, isAdmin, uid }) {
   const [communities, setCommunities] = useState([]);
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState(null);
@@ -949,6 +1031,9 @@ function CommunitiesScreen({ record, isAdmin }) {
     <div>
       <TopBar title="Comunidades" right={<HelpButton text="Lista de todas las comunidades y grupos independientes afiliados a Argyra. Toca cualquiera para ver su información (líder, embajadores, subcomunidades, estado) y, si tienes acceso, su Embajada privada." />} />
       <p className="text-xs text-[#5B5866] mb-4">Comunidades y grupos independientes afiliados a Argyra.</p>
+
+      <UserGroupsSection uid={uid} nick={record?.nick} isAdmin={isAdmin} />
+
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
       ) : communities.length === 0 ? (
@@ -1130,13 +1215,19 @@ function BranchCard({ bk, coords, info, isAdmin }) {
   const [link, setLink] = useState(info?.link || "");
   const [text, setText] = useState(info?.info || "");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   const save = async () => {
     setSaving(true);
+    setError("");
     try {
       await setDoc(doc(db, "branchInfo", bk), { link: link.trim(), info: text.trim() }, { merge: true });
       setEditing(false);
-    } catch (e) {}
+    } catch (e) {
+      setError(e?.code === "permission-denied"
+        ? "No tienes permiso para guardar (revisa las reglas de Firestore para 'branchInfo')."
+        : "No se pudo guardar. Intenta de nuevo.");
+    }
     setSaving(false);
   };
 
@@ -1157,6 +1248,7 @@ function BranchCard({ bk, coords, info, isAdmin }) {
         <div className="mb-3 border-t border-[#2A2C38] pt-3">
           <Field label="Enlace del grupo (WhatsApp, Discord, etc.)" placeholder="https://..." value={link} onChange={(e) => setLink(e.target.value)} />
           <TextArea label="Descripción de la rama" value={text} onChange={(e) => setText(e.target.value)} placeholder={b.blurb} />
+          {error && <div className="text-[11px] text-[#E07A7A] mb-2">{error}</div>}
           <PrimaryButton onClick={save} disabled={saving} className="py-1.5 text-xs">{saving ? <Loader2 size={14} className="animate-spin" /> : "Guardar"}</PrimaryButton>
         </div>
       )}
@@ -1941,7 +2033,7 @@ export default function App() {
   }
 
   let body;
-  if (tab === "communities") body = <CommunitiesScreen record={record} isAdmin={isAdmin} />;
+  if (tab === "communities") body = <CommunitiesScreen record={record} isAdmin={isAdmin} uid={user.uid} />;
   else if (tab === "team") body = <TeamScreen isAdmin={isAdmin} />;
   else if (tab === "pase") body = <PaseScreen record={record} uid={user.uid} />;
   else if (tab === "leaders") body = <LeadersScreen />;
