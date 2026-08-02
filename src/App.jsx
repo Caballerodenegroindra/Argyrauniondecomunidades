@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, Suspense, lazy } from "react";
 import {
   Shield, Users, Sparkles, Lock, Mail, Phone, User as UserIcon,
   CheckCircle2, XCircle, ChevronRight, LogOut, Settings, ClipboardList,
   ExternalLink, AlertCircle, Loader2, Home, Newspaper, Crown,
-  MessageCircle, Plus, Trash2, ArrowLeft
+  MessageCircle, Plus, Trash2, ArrowLeft, X
 } from "lucide-react";
 import {
   createUserWithEmailAndPassword,
@@ -13,7 +13,7 @@ import {
 } from "firebase/auth";
 import {
   doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs,
-  query, orderBy,
+  query, orderBy, onSnapshot,
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
 
@@ -82,9 +82,6 @@ const SUBTASKS = {
   ],
 };
 
-const emptyLinks = () =>
-  RANK_ORDER.reduce((acc, k) => ({ ...acc, [k]: { general: "", especifico: "" } }), {});
-
 function cx(...a) {
   return a.filter(Boolean).join(" ");
 }
@@ -151,6 +148,42 @@ function validatePhone(raw) {
 }
 
 // Convierte un teléfono guardado (ej: "+51999999999") en un enlace wa.me
+// Devuelve siempre un arreglo de rangos, incluso para cuentas antiguas que
+// todavía solo tienen el campo singular "rank" en vez de "ranks".
+function userRanks(u) {
+  if (!u) return [];
+  if (Array.isArray(u.ranks) && u.ranks.length) return u.ranks;
+  if (u.rank) return [u.rank];
+  return [];
+}
+
+// Selector de uno o más rangos/títulos (checkboxes).
+function RankPicker({ value, onChange }) {
+  const toggle = (k) => {
+    onChange(value.includes(k) ? value.filter((x) => x !== k) : [...value, k]);
+  };
+  return (
+    <div className="flex flex-wrap gap-2">
+      {RANK_ORDER.map((k) => {
+        const active = value.includes(k);
+        return (
+          <button
+            type="button"
+            key={k}
+            onClick={() => toggle(k)}
+            className="text-xs px-2.5 py-1.5 rounded-full border transition-colors"
+            style={active
+              ? { color: RANKS[k].color, borderColor: RANKS[k].color, background: `${RANKS[k].color}1A` }
+              : { color: "#5B5866", borderColor: "#2A2C38" }}
+          >
+            {RANKS[k].label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function waLink(phone) {
   const digits = (phone || "").replace(/[^0-9]/g, "");
   return digits ? `https://wa.me/${digits}` : null;
@@ -334,11 +367,11 @@ function AuthScreen() {
           email: email.trim(),
           status: "survey-pending",
           answers: {},
-          rank: null,
+          ranks: [],
           createdAt: Date.now(),
         });
         await setDoc(nameRef, { uid: cred.user.uid, email: email.trim() });
-        await syncDirectory(cred.user.uid, { nick: nick.trim(), rank: null, status: "survey-pending" });
+        await syncDirectory(cred.user.uid, { nick: nick.trim(), ranks: [], status: "survey-pending" });
         // onAuthStateChanged en el componente raíz recoge la sesión desde aquí.
       } else {
         const nameSnap = await getDoc(doc(db, "usernames", nickLower));
@@ -622,20 +655,30 @@ function TermsScreen({ uid, onSubmitted }) {
 /* ---------------- Profile ---------------- */
 
 function ProfileScreen({ record, onLogout }) {
-  const [links, setLinks] = useState(null);
+  const [groups, setGroups] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const myRanks = userRanks(record);
 
   useEffect(() => {
-    (async () => {
-      const snap = await getDoc(doc(db, "config", "rankLinks"));
-      setLinks(snap.exists() ? snap.data() : emptyLinks());
-    })();
+    const unsub = onSnapshot(
+      collection(db, "groups"),
+      (snap) => {
+        setGroups(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+    return unsub;
   }, []);
 
-  const rank = record.rank ? RANKS[record.rank] : null;
-  const rankLinks = links && record.rank ? links[record.rank] : null;
+  // Un grupo es accesible si es público (sin rangos asignados) o si
+  // comparte al menos uno de los rangos/títulos de la persona.
+  const myGroups = groups.filter((g) => !g.ranks?.length || g.ranks.some((r) => myRanks.includes(r)));
 
   return (
-    <Shell>
+    <div>
+      <TopBar title="Perfil" />
       <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
         <div className="flex items-start justify-between mb-4">
           <div>
@@ -657,33 +700,48 @@ function ProfileScreen({ record, onLogout }) {
           </div>
         )}
 
-        {record.status === "accepted" && rank && (
+        {record.status === "accepted" && (
           <div>
-            <div className="rounded-xl p-4 mb-4 border" style={{ borderColor: rank.color, background: `${rank.color}14` }}>
-              <span className="font-semibold" style={{ color: rank.color }}>{rank.label}</span>
-              <div className="text-sm text-[#D8D5E0]">{rank.title}</div>
-              <p className="text-xs text-[#96939F] mt-2">{rank.blurb}</p>
-            </div>
+            {myRanks.length === 0 && (
+              <div className="text-sm text-[#D8D5E0] bg-[#1D1F2A] border border-[#2A2C38] rounded-lg p-4 mb-4">
+                Todavía no tienes un rango asignado. Un administrador te lo asignará pronto.
+              </div>
+            )}
+
+            {myRanks.length > 0 && (
+              <div className="space-y-3 mb-4">
+                {myRanks.map((rk) => {
+                  const r = RANKS[rk];
+                  if (!r) return null;
+                  return (
+                    <div key={rk} className="rounded-xl p-4 border" style={{ borderColor: r.color, background: `${r.color}14` }}>
+                      <span className="font-semibold" style={{ color: r.color }}>{r.label}</span>
+                      <div className="text-sm text-[#D8D5E0]">{r.title}</div>
+                      <p className="text-xs text-[#96939F] mt-2">{r.blurb}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Tus enlaces de grupo</div>
-            <div className="space-y-2 mb-2">
-              <a
-                href={rankLinks?.general || "#"}
-                target="_blank" rel="noreferrer"
-                className={cx("flex items-center justify-between px-4 py-3 rounded-lg border text-sm", rankLinks?.general ? "border-[#2A2C38] hover:border-[#6C6CF0]" : "border-[#2A2C38] opacity-40 pointer-events-none")}
-              >
-                Grupo general <ExternalLink size={14} />
-              </a>
-              <a
-                href={rankLinks?.especifico || "#"}
-                target="_blank" rel="noreferrer"
-                className={cx("flex items-center justify-between px-4 py-3 rounded-lg border text-sm", rankLinks?.especifico ? "border-[#2A2C38] hover:border-[#6C6CF0]" : "border-[#2A2C38] opacity-40 pointer-events-none")}
-              >
-                Grupo de {rank.label} <ExternalLink size={14} />
-              </a>
-            </div>
-            {!(rankLinks?.general && rankLinks?.especifico) && (
-              <p className="text-xs text-[#96939F]">Un administrador todavía no configuró estos enlaces.</p>
+            {loading && <div className="text-xs text-[#5B5866]">Cargando…</div>}
+            {!loading && myGroups.length === 0 && (
+              <p className="text-xs text-[#96939F]">Un administrador todavía no configuró enlaces para tus rangos.</p>
+            )}
+            {!loading && myGroups.length > 0 && (
+              <div className="space-y-2">
+                {myGroups.map((g) => (
+                  <a
+                    key={g.id}
+                    href={g.link || "#"}
+                    target="_blank" rel="noreferrer"
+                    className={cx("flex items-center justify-between px-4 py-3 rounded-lg border text-sm", g.link ? "border-[#2A2C38] hover:border-[#6C6CF0]" : "border-[#2A2C38] opacity-40 pointer-events-none")}
+                  >
+                    {g.name} <ExternalLink size={14} />
+                  </a>
+                ))}
+              </div>
             )}
           </div>
         )}
@@ -692,7 +750,7 @@ function ProfileScreen({ record, onLogout }) {
           <LogOut size={14} /> Cerrar sesión
         </button>
       </div>
-    </Shell>
+    </div>
   );
 }
 
@@ -751,19 +809,21 @@ function HomeFeed({ isAdmin }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const q = query(collection(db, "news"), orderBy("createdAt", "desc"));
-      const snap = await getDocs(q);
-      setNews(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    } catch (e) {
-      setError("No se pudieron cargar las noticias.");
-    }
-    setLoading(false);
+  useEffect(() => {
+    const q = query(collection(db, "news"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        setNews(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setLoading(false);
+      },
+      () => {
+        setError("No se pudieron cargar las noticias.");
+        setLoading(false);
+      }
+    );
+    return unsub;
   }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   const publish = async () => {
     if (!title.trim() || !body.trim()) return;
@@ -776,7 +836,7 @@ function HomeFeed({ isAdmin }) {
         createdAt: Date.now(),
       });
       setTitle(""); setBody(""); setShowForm(false);
-      await load();
+      // No hace falta recargar: onSnapshot ya trae la noticia nueva sola.
     } catch (e) {
       setError("No se pudo publicar la noticia.");
     }
@@ -787,7 +847,6 @@ function HomeFeed({ isAdmin }) {
     const sure = window.confirm("¿Eliminar esta publicación?");
     if (!sure) return;
     await deleteDoc(doc(db, "news", id));
-    load();
   };
 
   return (
@@ -873,37 +932,66 @@ function HomeFeed({ isAdmin }) {
 
 /* ---------------- Comunidad: directorio de miembros ---------------- */
 
-function DirectoryScreen() {
+function DirectoryScreen({ canView, myRanks }) {
   const [members, setMembers] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const snap = await getDocs(collection(db, "directory"));
-        const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (!canView) { setLoading(false); return; }
+    setLoading(true);
+    let dirReady = false, groupsReady = false;
+    const maybeStopLoading = () => { if (dirReady && groupsReady) setLoading(false); };
+
+    const unsubDir = onSnapshot(
+      collection(db, "directory"),
+      (snap) => {
+        const recs = snap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          // Solo se muestran miembros ya registrados y aceptados en la comunidad.
+          .filter((m) => m.status === "accepted");
         recs.sort((a, b) => {
-          const ra = a.rank ? RANK_ORDER.indexOf(a.rank) : 99;
-          const rb = b.rank ? RANK_ORDER.indexOf(b.rank) : 99;
+          const ra = userRanks(a).length ? RANK_ORDER.indexOf(userRanks(a)[0]) : 99;
+          const rb = userRanks(b).length ? RANK_ORDER.indexOf(userRanks(b)[0]) : 99;
           if (ra !== rb) return ra - rb;
           return (a.nick || "").localeCompare(b.nick || "");
         });
         setMembers(recs);
-      } catch (e) {
-        setError("No se pudo cargar la lista de miembros.");
-      }
-      setLoading(false);
-    })();
-  }, []);
+        dirReady = true;
+        maybeStopLoading();
+      },
+      () => { setError("No se pudo cargar la información de la comunidad."); dirReady = true; maybeStopLoading(); }
+    );
+    const unsubGroups = onSnapshot(
+      collection(db, "groups"),
+      (snap) => {
+        setGroups(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        groupsReady = true;
+        maybeStopLoading();
+      },
+      () => { groupsReady = true; maybeStopLoading(); }
+    );
+    return () => { unsubDir(); unsubGroups(); };
+  }, [canView]);
+
+  if (!canView) {
+    return (
+      <div>
+        <TopBar title="Comunidad" />
+        <div className="text-sm text-[#5B5866] text-center py-14">
+          <Lock size={22} className="mx-auto mb-2 opacity-50" />
+          Esta sección es solo para miembros ya aceptados de la comunidad.
+        </div>
+      </div>
+    );
+  }
+
+  const myGroups = groups.filter((g) => !g.ranks?.length || g.ranks.some((r) => myRanks.includes(r)));
 
   return (
     <div>
       <TopBar title="Comunidad" />
-      <div className="text-sm text-[#96939F] mb-5">
-        Todos los miembros registrados de la Unión, junto a su rango.
-      </div>
 
       {loading && (
         <div className="flex items-center gap-2 text-sm text-[#96939F]">
@@ -913,23 +1001,54 @@ function DirectoryScreen() {
       {!loading && error && <div className="text-sm text-[#E07A7A]">{error}</div>}
 
       {!loading && !error && (
-        <div className="space-y-2">
-          {members.map((m) => {
-            const r = m.rank ? RANKS[m.rank] : null;
-            return (
-              <div key={m.id} className="flex items-center justify-between bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
-                <span>{m.nick || "Usuario"}</span>
-                {r ? (
-                  <span className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
-                    {r.label}
+        <>
+          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Grupos por función / proyecto</div>
+          {myGroups.length === 0 && (
+            <p className="text-xs text-[#5B5866] mb-5">Todavía no hay grupos configurados para tus rangos.</p>
+          )}
+          {myGroups.length > 0 && (
+            <div className="space-y-2 mb-6">
+              {myGroups.map((g) => (
+                <a
+                  key={g.id}
+                  href={g.link || "#"}
+                  target="_blank" rel="noreferrer"
+                  className={cx("flex items-center justify-between px-4 py-3 rounded-lg border text-sm", g.link ? "border-[#2A2C38] hover:border-[#6C6CF0]" : "border-[#2A2C38] opacity-40 pointer-events-none")}
+                >
+                  <span>
+                    {g.name}
+                    {g.description && <span className="block text-[11px] text-[#96939F] font-normal">{g.description}</span>}
                   </span>
-                ) : (
-                  <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>
-                )}
-              </div>
-            );
-          })}
-        </div>
+                  <ExternalLink size={14} className="shrink-0 ml-2" />
+                </a>
+              ))}
+            </div>
+          )}
+
+          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Miembros ({members.length})</div>
+          <div className="space-y-2">
+            {members.map((m) => {
+              const ranks = userRanks(m);
+              return (
+                <div key={m.id} className="flex items-center justify-between gap-2 bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
+                  <span className="truncate">{m.nick || "Usuario"}</span>
+                  <div className="flex flex-wrap gap-1.5 justify-end">
+                    {ranks.length === 0 && <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>}
+                    {ranks.map((rk) => {
+                      const r = RANKS[rk];
+                      if (!r) return null;
+                      return (
+                        <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
+                          {r.label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
@@ -948,20 +1067,19 @@ function LeadersScreen({ isSuperAdmin }) {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const snap = await getDocs(collection(db, "leaders"));
-      const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      recs.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
-      setLeaders(recs);
-    } catch (e) {
-      setError("No se pudo cargar la lista de líderes.");
-    }
-    setLoading(false);
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, "leaders"),
+      (snap) => {
+        const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        recs.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+        setLeaders(recs);
+        setLoading(false);
+      },
+      () => { setError("No se pudo cargar la lista de líderes."); setLoading(false); }
+    );
+    return unsub;
   }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   const addLeader = async () => {
     setFormError("");
@@ -988,7 +1106,7 @@ function LeadersScreen({ isSuperAdmin }) {
         addedAt: Date.now(),
       });
       setNick(""); setCustomTitle(""); setShowForm(false);
-      await load();
+      // No hace falta recargar: onSnapshot ya trae el líder nuevo solo.
     } catch (e) {
       setFormError("No se pudo agregar al líder. Intenta de nuevo.");
     }
@@ -999,7 +1117,6 @@ function LeadersScreen({ isSuperAdmin }) {
     const sure = window.confirm("¿Quitar a esta persona de la lista de líderes?");
     if (!sure) return;
     await deleteDoc(doc(db, "leaders", uid));
-    load();
   };
 
   if (selected) {
@@ -1124,8 +1241,7 @@ function AdminPanel({ onExit, currentUid }) {
   const [users, setUsers] = useState([]);
   const [adminUids, setAdminUids] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [links, setLinks] = useState(emptyLinks());
-  const [savingLinks, setSavingLinks] = useState(false);
+  const [groups, setGroups] = useState([]);
 
   const [grantNick, setGrantNick] = useState("");
   const [granting, setGranting] = useState(false);
@@ -1145,10 +1261,10 @@ function AdminPanel({ onExit, currentUid }) {
       // Pone al día el directorio público para cuentas que se registraron
       // antes de que existiera esta sección (no bloquea la carga del panel).
       recs.forEach((u) => {
-        syncDirectory(u.id, { nick: u.nick || "", rank: u.rank || null, status: u.status || "survey-pending" });
+        syncDirectory(u.id, { nick: u.nick || "", ranks: userRanks(u), status: u.status || "survey-pending" });
       });
-      const lr = await getDoc(doc(db, "config", "rankLinks"));
-      setLinks(lr.exists() ? lr.data() : emptyLinks());
+      const groupsSnap = await getDocs(collection(db, "groups"));
+      setGroups(groupsSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
       const adminsSnap = await getDocs(collection(db, "admins"));
       setAdminUids(adminsSnap.docs.map((d) => d.id));
     } catch (e) {
@@ -1159,17 +1275,30 @@ function AdminPanel({ onExit, currentUid }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const decide = async (user, status, rank) => {
-    const finalRank = rank || user.rank || null;
-    await updateDoc(doc(db, "users", user.id), { status, rank: finalRank });
-    await syncDirectory(user.id, { status, rank: finalRank });
+  const decide = async (user, status, ranks) => {
+    const finalRanks = ranks || userRanks(user);
+    await updateDoc(doc(db, "users", user.id), { status, ranks: finalRanks });
+    await syncDirectory(user.id, { status, ranks: finalRanks });
     load();
   };
 
-  const saveLinks = async () => {
-    setSavingLinks(true);
-    await setDoc(doc(db, "config", "rankLinks"), links);
-    setSavingLinks(false);
+  const saveGroup = async (group) => {
+    const id = group.id || `g_${Date.now()}`;
+    await setDoc(doc(db, "groups", id), {
+      name: group.name.trim(),
+      description: group.description?.trim() || "",
+      link: group.link.trim(),
+      ranks: group.ranks || [],
+      order: group.order ?? Date.now(),
+    });
+    await load();
+  };
+
+  const deleteGroup = async (id) => {
+    const sure = window.confirm("¿Eliminar este grupo?");
+    if (!sure) return;
+    await deleteDoc(doc(db, "groups", id));
+    await load();
   };
 
   const grantAdmin = async () => {
@@ -1219,20 +1348,24 @@ function AdminPanel({ onExit, currentUid }) {
 
   return (
     <Shell>
-      <div className="w-full max-w-2xl">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex bg-[#1D1F2A] rounded-lg p-1">
-            <button onClick={() => setTab("solicitudes")} className={cx("text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "solicitudes" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
-              <ClipboardList size={14} /> Solicitudes
-            </button>
-            <button onClick={() => setTab("enlaces")} className={cx("text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "enlaces" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
-              <Settings size={14} /> Enlaces por rango
-            </button>
-            <button onClick={() => setTab("admins")} className={cx("text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "admins" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
-              <Shield size={14} /> Administradores
-            </button>
+      <div className="w-full max-w-2xl overflow-x-hidden">
+        <div className="flex items-center justify-between gap-2 mb-4">
+          <div className="flex-1 min-w-0 overflow-x-auto -mx-1 px-1">
+            <div className="flex bg-[#1D1F2A] rounded-lg p-1 gap-1 w-max">
+              <button onClick={() => setTab("solicitudes")} className={cx("shrink-0 whitespace-nowrap text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "solicitudes" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
+                <ClipboardList size={14} /> Solicitudes
+              </button>
+              <button onClick={() => setTab("enlaces")} className={cx("shrink-0 whitespace-nowrap text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "enlaces" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
+                <Settings size={14} /> Grupos
+              </button>
+              <button onClick={() => setTab("admins")} className={cx("shrink-0 whitespace-nowrap text-sm px-3 py-1.5 rounded-md flex items-center gap-1.5", tab === "admins" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>
+                <Shield size={14} /> Admins
+              </button>
+            </div>
           </div>
-          <button onClick={onExit} className="text-xs text-[#96939F] hover:text-[#F2F0EB]">Salir</button>
+          <button onClick={onExit} className="shrink-0 flex items-center gap-1 text-xs text-[#96939F] hover:text-[#F2F0EB] border border-[#2A2C38] rounded-lg px-2.5 py-2">
+            <X size={14} /> Salir
+          </button>
         </div>
 
         {loading && (
@@ -1266,17 +1399,7 @@ function AdminPanel({ onExit, currentUid }) {
                 <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2 mt-6">Resueltas</div>
                 <div className="space-y-2">
                   {resueltas.map((u) => (
-                    <div key={u.id} className="flex items-center justify-between bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
-                      <span>{u.nick}</span>
-                      <div className="flex items-center gap-2">
-                        {u.rank && (
-                          <span className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: RANKS[u.rank].color, borderColor: RANKS[u.rank].color }}>
-                            {RANKS[u.rank].label}
-                          </span>
-                        )}
-                        <StatusBadge status={u.status} />
-                      </div>
-                    </div>
+                    <ResueltaRow key={u.id} user={u} onSaveRanks={(ranks) => decide(u, u.status, ranks)} />
                   ))}
                 </div>
               </div>
@@ -1285,30 +1408,7 @@ function AdminPanel({ onExit, currentUid }) {
         )}
 
         {!loading && !loadError && tab === "enlaces" && (
-          <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6 space-y-5">
-            {RANK_ORDER.map((k) => (
-              <div key={k}>
-                <div className="text-sm font-medium mb-2" style={{ color: RANKS[k].color }}>
-                  {RANKS[k].label} — {RANKS[k].title}
-                </div>
-                <Field
-                  label="Enlace del grupo general"
-                  placeholder="https://chat.whatsapp.com/..."
-                  value={links[k]?.general || ""}
-                  onChange={(e) => setLinks((prev) => ({ ...prev, [k]: { ...prev[k], general: e.target.value } }))}
-                />
-                <Field
-                  label={`Enlace específico de ${RANKS[k].label}`}
-                  placeholder="https://chat.whatsapp.com/..."
-                  value={links[k]?.especifico || ""}
-                  onChange={(e) => setLinks((prev) => ({ ...prev, [k]: { ...prev[k], especifico: e.target.value } }))}
-                />
-              </div>
-            ))}
-            <PrimaryButton onClick={saveLinks} disabled={savingLinks}>
-              {savingLinks ? <Loader2 size={16} className="animate-spin" /> : "Guardar enlaces"}
-            </PrimaryButton>
-          </div>
+          <GroupsManager groups={groups} onSave={saveGroup} onDelete={deleteGroup} />
         )}
 
         {!loading && !loadError && tab === "admins" && (
@@ -1358,8 +1458,152 @@ function AdminPanel({ onExit, currentUid }) {
   );
 }
 
+function GroupsManager({ groups, onSave, onDelete }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [link, setLink] = useState("");
+  const [ranks, setRanks] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  const resetForm = () => {
+    setEditingId(null); setName(""); setDescription(""); setLink(""); setRanks([]); setShowForm(false);
+  };
+
+  const editGroup = (g) => {
+    setEditingId(g.id); setName(g.name); setDescription(g.description || ""); setLink(g.link || ""); setRanks(g.ranks || []);
+    setShowForm(true);
+  };
+
+  const save = async () => {
+    if (!name.trim() || !link.trim()) return;
+    setSaving(true);
+    await onSave({ id: editingId, name, description, link, ranks });
+    setSaving(false);
+    resetForm();
+  };
+
+  return (
+    <div className="space-y-5">
+      <p className="text-xs text-[#96939F]">
+        Crea grupos por función o proyecto (ej. "Grupo de Programación") y elige qué rangos tienen acceso.
+        Si no marcas ningún rango, el grupo queda visible para todos los miembros aceptados.
+      </p>
+
+      {!showForm ? (
+        <button
+          onClick={() => setShowForm(true)}
+          className="w-full flex items-center justify-center gap-2 border border-dashed border-[#2A2C38] hover:border-[#6C6CF0] rounded-xl py-3 text-sm text-[#96939F] hover:text-[#6C6CF0] transition-colors"
+        >
+          <Plus size={15} /> Nuevo grupo
+        </button>
+      ) : (
+        <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5 space-y-1">
+          <Field label="Nombre del grupo" placeholder="Grupo de Programación" value={name} onChange={(e) => setName(e.target.value)} />
+          <Field label="Descripción (opcional)" placeholder="Herramientas y desarrollo" value={description} onChange={(e) => setDescription(e.target.value)} />
+          <Field label="Enlace" placeholder="https://chat.whatsapp.com/..." value={link} onChange={(e) => setLink(e.target.value)} />
+          <div className="mb-4">
+            <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Rangos con acceso (vacío = todos)</span>
+            <RankPicker value={ranks} onChange={setRanks} />
+          </div>
+          <div className="flex gap-2">
+            <PrimaryButton onClick={save} disabled={saving || !name.trim() || !link.trim()}>
+              {saving ? <Loader2 size={16} className="animate-spin" /> : editingId ? "Guardar cambios" : "Crear grupo"}
+            </PrimaryButton>
+            <button onClick={resetForm} className="px-4 text-sm text-[#96939F] hover:text-[#F2F0EB]">Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {groups.length === 0 && <div className="text-sm text-[#5B5866]">Todavía no hay grupos creados.</div>}
+        {groups.map((g) => (
+          <div key={g.id} className="bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-sm font-medium truncate">{g.name}</div>
+                {g.description && <div className="text-xs text-[#96939F]">{g.description}</div>}
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {(!g.ranks || g.ranks.length === 0) && (
+                    <span className="text-[10px] uppercase px-2 py-0.5 rounded-full border border-[#2A2C38] text-[#96939F]">Todos</span>
+                  )}
+                  {(g.ranks || []).map((rk) => (
+                    <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: RANKS[rk].color, borderColor: RANKS[rk].color }}>
+                      {RANKS[rk].label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button onClick={() => editGroup(g)} className="text-xs text-[#6C6CF0] hover:underline">Editar</button>
+                <button onClick={() => onDelete(g.id)} className="text-[#5B5866] hover:text-[#E07A7A]">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ResueltaRow({ user, onSaveRanks }) {
+  const [editing, setEditing] = useState(false);
+  const [ranks, setRanks] = useState(userRanks(user));
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    await onSaveRanks(ranks);
+    setSaving(false);
+    setEditing(false);
+  };
+
+  const myRanks = userRanks(user);
+
+  return (
+    <div className="bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate">{user.nick}</span>
+        <div className="flex items-center gap-2 shrink-0">
+          {!editing && (
+            <div className="flex flex-wrap gap-1 justify-end">
+              {myRanks.map((rk) => (
+                <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: RANKS[rk].color, borderColor: RANKS[rk].color }}>
+                  {RANKS[rk].label}
+                </span>
+              ))}
+            </div>
+          )}
+          <StatusBadge status={user.status} />
+          {user.status === "accepted" && !editing && (
+            <button onClick={() => setEditing(true)} className="text-[11px] text-[#6C6CF0] hover:underline shrink-0">
+              Cambiar rango
+            </button>
+          )}
+        </div>
+      </div>
+      {editing && (
+        <div className="mt-2.5 pt-2.5 border-t border-[#2A2C38] space-y-2.5">
+          <RankPicker value={ranks} onChange={setRanks} />
+          <div className="flex items-center gap-2">
+            <button onClick={save} disabled={saving} className="flex items-center gap-1.5 bg-[#4E9A6B]/15 text-[#4E9A6B] border border-[#4E9A6B]/40 rounded-lg px-3 py-2 text-xs hover:bg-[#4E9A6B]/25 disabled:opacity-50">
+              {saving ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Guardar
+            </button>
+            <button onClick={() => { setEditing(false); setRanks(userRanks(user)); }} className="text-xs text-[#96939F] px-2 py-2">
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SolicitudCard({ user, onDecide }) {
-  const [rank, setRank] = useState(user.rank || user.answers?.tareas?.[0] || RANK_ORDER[0]);
+  const [ranks, setRanks] = useState(userRanks(user).length ? userRanks(user) : (user.answers?.tareas || []));
   return (
     <div className="bg-[#16171F] border border-[#2A2C38] rounded-xl p-4">
       <div className="flex items-center justify-between mb-2">
@@ -1383,14 +1627,15 @@ function SolicitudCard({ user, onDecide }) {
           </div>
         )}
       </div>
+      <div className="mb-3">
+        <span className="block text-[10px] uppercase tracking-wide text-[#96939F] mb-1.5">Rango(s) a otorgar</span>
+        <RankPicker value={ranks} onChange={setRanks} />
+      </div>
       <div className="flex items-center gap-2">
-        <select value={rank} onChange={(e) => setRank(e.target.value)} className="bg-[#1D1F2A] border border-[#2A2C38] rounded-lg text-sm px-2 py-2 flex-1">
-          {RANK_ORDER.map((k) => <option key={k} value={k}>{RANKS[k].label}</option>)}
-        </select>
-        <button onClick={() => onDecide(user, "accepted", rank)} className="flex items-center gap-1.5 bg-[#4E9A6B]/15 text-[#4E9A6B] border border-[#4E9A6B]/40 rounded-lg px-3 py-2 text-sm hover:bg-[#4E9A6B]/25">
+        <button onClick={() => onDecide(user, "accepted", ranks)} className="flex items-center gap-1.5 bg-[#4E9A6B]/15 text-[#4E9A6B] border border-[#4E9A6B]/40 rounded-lg px-3 py-2 text-sm hover:bg-[#4E9A6B]/25">
           <CheckCircle2 size={14} /> Aceptar
         </button>
-        <button onClick={() => onDecide(user, "rejected")} className="flex items-center gap-1.5 bg-[#E07A7A]/15 text-[#E07A7A] border border-[#E07A7A]/40 rounded-lg px-3 py-2 text-sm hover:bg-[#E07A7A]/25">
+        <button onClick={() => onDecide(user, "rejected", [])} className="flex items-center gap-1.5 bg-[#E07A7A]/15 text-[#E07A7A] border border-[#E07A7A]/40 rounded-lg px-3 py-2 text-sm hover:bg-[#E07A7A]/25">
           <XCircle size={14} /> Rechazar
         </button>
       </div>
@@ -1510,7 +1755,7 @@ export default function App() {
   }
 
   let body;
-  if (tab === "directory") body = <DirectoryScreen />;
+  if (tab === "directory") body = <DirectoryScreen canView={record.status === "accepted" || isAdmin} myRanks={userRanks(record)} />;
   else if (tab === "leaders") body = <LeadersScreen isSuperAdmin={isSuperAdmin} />;
   else if (tab === "profile") body = <ProfileScreen record={record} onLogout={logout} />;
   else body = <HomeFeed isAdmin={isAdmin} />;
