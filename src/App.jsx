@@ -920,6 +920,7 @@ function DirectorioCentralScreen({ isAdmin, record, communities }) {
 function UserGroupsSection({ uid, nick, isAdmin }) {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [kind, setKind] = useState("grupo"); // 'grupo' | 'comunidad'
   const [name, setName] = useState("");
   const [link, setLink] = useState("");
   const [saving, setSaving] = useState(false);
@@ -934,13 +935,16 @@ function UserGroupsSection({ uid, nick, isAdmin }) {
     return unsub;
   }, []);
 
+  const isWhatsAppLink = (url) => /^https:\/\/(chat\.whatsapp\.com|wa\.me)\//i.test(url.trim());
+
   const add = async () => {
     if (!name.trim() || !link.trim()) { setError("Escribe un nombre y un enlace."); return; }
+    if (!isWhatsAppLink(link)) { setError("Solo se permiten enlaces de WhatsApp (https://chat.whatsapp.com/...)."); return; }
     setSaving(true);
     setError("");
     try {
       await addDoc(collection(db, "userGroups"), {
-        name: name.trim(), link: link.trim(),
+        name: name.trim(), link: link.trim(), kind,
         ownerUid: uid, ownerNick: nick || "—",
         createdAt: Date.now(),
       });
@@ -954,44 +958,64 @@ function UserGroupsSection({ uid, nick, isAdmin }) {
   };
 
   const remove = async (id) => {
-    if (!confirm("¿Eliminar este grupo?")) return;
+    if (!confirm("¿Eliminar este elemento?")) return;
     try { await deleteDoc(doc(db, "userGroups", id)); } catch (e) {}
   };
 
-  return (
-    <SectionCard title="Grupos de la comunidad" icon={Users}>
-      <p className="text-xs text-[#96939F] mb-3">Cualquier miembro, tenga rango o no, puede dejar aquí el enlace de un grupo (WhatsApp, Discord, etc.) del que sea admin.</p>
+  const comunidades = groups.filter((g) => g.kind === "comunidad");
+  const grupos = groups.filter((g) => g.kind !== "comunidad");
 
-      <Field label="Nombre del grupo" placeholder="Ej: Dynasty Ark Nexus" value={name} onChange={(e) => setName(e.target.value)} />
-      <Field label="Enlace del grupo" placeholder="https://..." value={link} onChange={(e) => setLink(e.target.value)} />
+  const List = ({ items, emptyText }) => (
+    items.length === 0 ? (
+      <EmptyState text={emptyText} />
+    ) : (
+      <div className="space-y-2">
+        {items.map((g) => (
+          <div key={g.id} className="flex items-center justify-between gap-2 border border-[#2A2C38] rounded-lg px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-sm font-medium truncate">{g.name}</div>
+              <a href={g.link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[#6C6CF0]">
+                <ExternalLink size={12} /> Abrir enlace
+              </a>
+              <div className="text-[11px] text-[#5B5866]">Agregado por {g.ownerNick}</div>
+            </div>
+            {(isAdmin || g.ownerUid === uid) && (
+              <button onClick={() => remove(g.id)} className="shrink-0 text-[#96939F] hover:text-[#E07A7A]">
+                <Trash2 size={14} />
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    )
+  );
+
+  return (
+    <SectionCard title="Grupos y comunidades de miembros" icon={Users}>
+      <p className="text-xs text-[#96939F] mb-3">Cualquier miembro, tenga rango o no, puede dejar aquí el enlace de un grupo o comunidad de WhatsApp del que sea admin.</p>
+
+      <div className="flex gap-2 mb-4">
+        <button onClick={() => setKind("grupo")} className={cx("flex-1 text-sm py-2 rounded-lg border", kind === "grupo" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Grupo</button>
+        <button onClick={() => setKind("comunidad")} className={cx("flex-1 text-sm py-2 rounded-lg border", kind === "comunidad" ? "border-[#6C6CF0] bg-[#6C6CF0]/10" : "border-[#2A2C38]")}>Comunidad</button>
+      </div>
+
+      <Field label="Nombre" placeholder="Ej: Dynasty Ark Nexus" value={name} onChange={(e) => setName(e.target.value)} />
+      <Field label="Enlace de WhatsApp" hint="Solo se aceptan enlaces de WhatsApp (chat.whatsapp.com)." placeholder="https://chat.whatsapp.com/..." value={link} onChange={(e) => setLink(e.target.value)} />
       {error && <div className="text-[11px] text-[#E07A7A] mb-2">{error}</div>}
       <PrimaryButton onClick={add} disabled={saving} className="py-1.5 text-xs mb-4">
-        {saving ? <Loader2 size={14} className="animate-spin" /> : "Agregar grupo"}
+        {saving ? <Loader2 size={14} className="animate-spin" /> : "Agregar"}
       </PrimaryButton>
 
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-4"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
-      ) : groups.length === 0 ? (
-        <EmptyState text="Todavía nadie agregó un grupo." />
       ) : (
-        <div className="space-y-2">
-          {groups.map((g) => (
-            <div key={g.id} className="flex items-center justify-between gap-2 border border-[#2A2C38] rounded-lg px-3 py-2">
-              <div className="min-w-0">
-                <div className="text-sm font-medium truncate">{g.name}</div>
-                <a href={g.link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[#6C6CF0]">
-                  <ExternalLink size={12} /> Abrir enlace
-                </a>
-                <div className="text-[11px] text-[#5B5866]">Agregado por {g.ownerNick}</div>
-              </div>
-              {(isAdmin || g.ownerUid === uid) && (
-                <button onClick={() => remove(g.id)} className="shrink-0 text-[#96939F] hover:text-[#E07A7A]">
-                  <Trash2 size={14} />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1.5">Comunidades agregadas</div>
+          <div className="mb-4"><List items={comunidades} emptyText="Todavía nadie agregó una comunidad." /></div>
+
+          <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1.5">Grupos agregados</div>
+          <List items={grupos} emptyText="Todavía nadie agregó un grupo." />
+        </>
       )}
     </SectionCard>
   );
