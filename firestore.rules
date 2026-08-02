@@ -49,6 +49,11 @@ service cloud.firestore {
         request.auth.uid == uid &&
         resource.data.status != "accepted" &&
         resource.data.status != "rejected"
+      ) || (
+        // Un miembro ya aceptado puede seguir actualizando SOLO cuántos
+        // grupos administra (no puede tocar su propio status/ranks así).
+        request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["groupsManaged"])
       );
       allow delete: if isAdmin();
     }
@@ -68,6 +73,9 @@ service cloud.firestore {
         request.auth.uid == uid &&
         resource.data.status != "accepted" &&
         resource.data.status != "rejected"
+      ) || (
+        request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["groupsManaged"])
       );
       allow delete: if isAdmin();
     }
