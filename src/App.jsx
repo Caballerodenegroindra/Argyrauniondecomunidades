@@ -16,6 +16,7 @@ import {
   query, orderBy, onSnapshot,
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
+import argyraLogo from "./assets/argyra-logo.png";
 
 /* ---------------------------------------------------------
    Tokens de diseño (mismos que la referencia de marca Argyra)
@@ -258,6 +259,10 @@ function Shell({ children }) {
     <div className="min-h-screen w-full bg-[#0C0D12] text-[#F2F0EB] relative overflow-hidden">
       <div className="pointer-events-none absolute -top-24 -right-24 w-[420px] h-[420px] rounded-full border border-[#2A2C38] opacity-40" />
       <div className="pointer-events-none absolute -top-10 -right-10 w-[300px] h-[300px] rounded-full border border-[#2A2C38] opacity-30" />
+      <div
+        className="pointer-events-none fixed inset-0 bg-center bg-no-repeat opacity-[0.06]"
+        style={{ backgroundImage: `url(${argyraLogo})`, backgroundSize: "min(70vw, 620px)" }}
+      />
       <div className="relative z-10 min-h-screen flex flex-col items-center px-4 py-10">
         <div className="mb-8 text-center">
           <div className="text-2xl tracking-[0.25em]" style={{ fontFamily: "'Cinzel', serif", color: "#C9A036" }}>
@@ -654,11 +659,35 @@ function TermsScreen({ uid, onSubmitted }) {
 
 /* ---------------- Profile ---------------- */
 
-function ProfileScreen({ record, onLogout }) {
+function ProfileScreen({ record, uid, onLogout, onSaved }) {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [managedCount, setManagedCount] = useState(record.groupsManaged ?? "");
+  const [savingManaged, setSavingManaged] = useState(false);
+  const [managedError, setManagedError] = useState("");
+  const [managedSaved, setManagedSaved] = useState(false);
 
   const myRanks = userRanks(record);
+
+  const saveManagedCount = async () => {
+    setManagedError("");
+    setManagedSaved(false);
+    const n = parseInt(managedCount, 10);
+    if (isNaN(n) || n < 0) {
+      setManagedError("Escribe un número válido (0 o más).");
+      return;
+    }
+    setSavingManaged(true);
+    try {
+      await updateDoc(doc(db, "users", uid), { groupsManaged: n });
+      await syncDirectory(uid, { groupsManaged: n });
+      onSaved && onSaved();
+      setManagedSaved(true);
+    } catch (e) {
+      setManagedError("No se pudo guardar. Intenta de nuevo.");
+    }
+    setSavingManaged(false);
+  };
 
   useEffect(() => {
     const unsub = onSnapshot(
@@ -723,6 +752,30 @@ function ProfileScreen({ record, onLogout }) {
                 })}
               </div>
             )}
+
+            <div className="bg-[#1D1F2A] border border-[#2A2C38] rounded-lg p-4 mb-4">
+              <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Grupos que administras</span>
+              <p className="text-[11px] text-[#5B5866] mb-3">Este número se muestra en Comunidad junto a tu nombre.</p>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  value={managedCount}
+                  onChange={(e) => { setManagedCount(e.target.value); setManagedSaved(false); }}
+                  className="w-24 bg-[#12131A] border border-[#2A2C38] rounded-lg px-3 py-2 text-sm text-[#F2F0EB] outline-none focus:border-[#6C6CF0]"
+                  placeholder="0"
+                />
+                <button
+                  onClick={saveManagedCount}
+                  disabled={savingManaged}
+                  className="flex-1 bg-[#6C6CF0] hover:bg-[#5A5AE0] disabled:opacity-40 text-white text-sm font-medium rounded-lg px-4 transition-colors"
+                >
+                  {savingManaged ? <Loader2 size={14} className="animate-spin mx-auto" /> : "Guardar"}
+                </button>
+              </div>
+              {managedError && <span className="block text-[11px] text-[#E07A7A] mt-1.5">{managedError}</span>}
+              {managedSaved && !managedError && <span className="block text-[11px] text-[#4E9A6B] mt-1.5">Guardado.</span>}
+            </div>
 
             <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Tus enlaces de grupo</div>
             {loading && <div className="text-xs text-[#5B5866]">Cargando…</div>}
@@ -932,11 +985,17 @@ function HomeFeed({ isAdmin }) {
 
 /* ---------------- Comunidad: directorio de miembros ---------------- */
 
-function DirectoryScreen({ canView, myRanks }) {
+function DirectoryScreen({ canView, myRanks, isAdmin }) {
   const [members, setMembers] = useState([]);
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  // Solo para administradores: copia con teléfono + respuestas del
+  // registro (users/{uid}.answers), para el buscador y el detalle.
+  const [adminExtra, setAdminExtra] = useState({});
+  const [filterKey, setFilterKey] = useState(""); // "rankKey||texto de la opción"
+  const [selectedMember, setSelectedMember] = useState(null);
 
   useEffect(() => {
     if (!canView) { setLoading(false); return; }
@@ -975,6 +1034,25 @@ function DirectoryScreen({ canView, myRanks }) {
     return () => { unsubDir(); unsubGroups(); };
   }, [canView]);
 
+  // Solo para administradores: teléfono + qué marcó cada quien en su
+  // registro (users/{uid}.answers), para poder verlo y buscar por opción.
+  useEffect(() => {
+    if (!canView || !isAdmin) { setAdminExtra({}); return; }
+    const unsub = onSnapshot(
+      collection(db, "users"),
+      (snap) => {
+        const map = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          map[d.id] = { phone: data.phone || "", answers: data.answers || null };
+        });
+        setAdminExtra(map);
+      },
+      () => {}
+    );
+    return unsub;
+  }, [canView, isAdmin]);
+
   if (!canView) {
     return (
       <div>
@@ -989,6 +1067,89 @@ function DirectoryScreen({ canView, myRanks }) {
 
   const myGroups = groups.filter((g) => !g.ranks?.length || g.ranks.some((r) => myRanks.includes(r)));
 
+  // Filtro de búsqueda por opción marcada en el registro (solo admin).
+  const [filterRank, filterText] = filterKey ? filterKey.split("||") : ["", ""];
+  const visibleMembers = !isAdmin || !filterKey
+    ? members
+    : members.filter((m) => {
+        const answers = adminExtra[m.id]?.answers;
+        const list = answers?.tareasDetalle?.[filterRank] || [];
+        return list.includes(filterText);
+      });
+
+  // ---- Vista de detalle de un miembro (solo administradores) ----
+  if (isAdmin && selectedMember) {
+    const extra = adminExtra[selectedMember.id] || {};
+    const wa = waLink(extra.phone);
+    const ranks = userRanks(selectedMember);
+    const answers = extra.answers;
+    return (
+      <div>
+        <TopBar title="Perfil del miembro" onBack={() => setSelectedMember(null)} />
+        <div className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-6">
+          <div className="text-lg font-semibold">{selectedMember.nick || "Usuario"}</div>
+          <div className="flex flex-wrap gap-1.5 mt-2 mb-4">
+            {ranks.length === 0 && <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>}
+            {ranks.map((rk) => {
+              const r = RANKS[rk];
+              if (!r) return null;
+              return (
+                <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
+                  {r.label}
+                </span>
+              );
+            })}
+          </div>
+
+          {!!selectedMember.groupsManaged && (
+            <div className="text-sm text-[#D8D5E0] mb-4">Administra {selectedMember.groupsManaged} grupo{selectedMember.groupsManaged === 1 ? "" : "s"}.</div>
+          )}
+
+          {wa ? (
+            <a
+              href={wa} target="_blank" rel="noreferrer"
+              className="w-full flex items-center justify-center gap-2 bg-[#4E9A6B] hover:bg-[#43855C] text-white font-medium text-sm rounded-lg px-4 py-2.5 transition-colors mb-5"
+            >
+              <MessageCircle size={16} /> Contactar por WhatsApp
+            </a>
+          ) : (
+            <p className="text-xs text-[#5B5866] mb-5">Esta persona aún no tiene un número configurado.</p>
+          )}
+
+          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Lo que marcó en su registro</div>
+          {!answers ? (
+            <p className="text-xs text-[#5B5866]">No hay datos de registro disponibles todavía.</p>
+          ) : (
+            <div className="space-y-3">
+              {answers.experiencia && (
+                <div className="text-sm text-[#D8D5E0]">
+                  <span className="text-[#96939F]">¿Experiencia previa? </span>{answers.experiencia}
+                </div>
+              )}
+              {(answers.tareas || []).map((rk) => {
+                const r = RANKS[rk];
+                const opciones = answers.tareasDetalle?.[rk] || [];
+                return (
+                  <div key={rk} className="rounded-lg p-3 border" style={{ borderColor: `${r?.color || "#2A2C38"}55` }}>
+                    <div className="text-xs font-semibold mb-1.5" style={{ color: r?.color }}>{r?.label || rk}</div>
+                    <ul className="space-y-1">
+                      {opciones.map((op, i) => (
+                        <li key={i} className="text-xs text-[#D8D5E0] flex items-start gap-1.5">
+                          <CheckCircle2 size={12} className="mt-0.5 shrink-0" style={{ color: r?.color }} />
+                          {op}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <TopBar title="Comunidad" />
@@ -1002,6 +1163,11 @@ function DirectoryScreen({ canView, myRanks }) {
 
       {!loading && !error && (
         <>
+          <div className="flex items-center justify-between bg-[#16171F] border border-[#2A2C38] rounded-xl px-4 py-3 mb-5">
+            <span className="text-sm text-[#D8D5E0]">Miembros totales en la comunidad</span>
+            <span className="text-lg font-semibold text-[#C9A036]">{members.length}</span>
+          </div>
+
           <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Grupos por función / proyecto</div>
           {myGroups.length === 0 && (
             <p className="text-xs text-[#5B5866] mb-5">Todavía no hay grupos configurados para tus rangos.</p>
@@ -1025,26 +1191,67 @@ function DirectoryScreen({ canView, myRanks }) {
             </div>
           )}
 
-          <div className="text-xs uppercase tracking-wide text-[#96939F] mb-2">Miembros ({members.length})</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs uppercase tracking-wide text-[#96939F]">Miembros ({visibleMembers.length}{filterKey ? ` de ${members.length}` : ""})</div>
+          </div>
+
+          {isAdmin && (
+            <div className="mb-3">
+              <select
+                value={filterKey}
+                onChange={(e) => setFilterKey(e.target.value)}
+                className="w-full bg-[#1D1F2A] border border-[#2A2C38] rounded-lg px-3 py-2.5 text-sm text-[#F2F0EB] outline-none focus:border-[#6C6CF0]"
+              >
+                <option value="">Buscar por lo que marcó en su registro…</option>
+                {RANK_ORDER.map((rk) => (
+                  <optgroup key={rk} label={RANKS[rk].label}>
+                    {SUBTASKS[rk].map((txt, idx) => (
+                      <option key={idx} value={`${rk}||${txt}`}>{txt}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              {filterKey && visibleMembers.length === 0 && (
+                <p className="text-xs text-[#5B5866] mt-2">Nadie marcó esta opción en su registro.</p>
+              )}
+            </div>
+          )}
+
           <div className="space-y-2">
-            {members.map((m) => {
+            {visibleMembers.map((m) => {
               const ranks = userRanks(m);
+              const Row = isAdmin ? "button" : "div";
               return (
-                <div key={m.id} className="flex items-center justify-between gap-2 bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm">
-                  <span className="truncate">{m.nick || "Usuario"}</span>
-                  <div className="flex flex-wrap gap-1.5 justify-end">
-                    {ranks.length === 0 && <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>}
-                    {ranks.map((rk) => {
-                      const r = RANKS[rk];
-                      if (!r) return null;
-                      return (
-                        <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
-                          {r.label}
-                        </span>
-                      );
-                    })}
+                <Row
+                  key={m.id}
+                  onClick={isAdmin ? () => setSelectedMember(m) : undefined}
+                  className={cx(
+                    "w-full flex items-center justify-between gap-2 bg-[#16171F] border border-[#2A2C38] rounded-lg px-4 py-2.5 text-sm text-left",
+                    isAdmin && "hover:border-[#6C6CF0] transition-colors"
+                  )}
+                >
+                  <div className="min-w-0">
+                    <span className="truncate block">{m.nick || "Usuario"}</span>
+                    {!!m.groupsManaged && (
+                      <span className="text-[10px] text-[#96939F]">Administra {m.groupsManaged} grupo{m.groupsManaged === 1 ? "" : "s"}</span>
+                    )}
                   </div>
-                </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex flex-wrap gap-1.5 justify-end">
+                      {ranks.length === 0 && <span className="text-[10px] text-[#5B5866] uppercase">Sin rango</span>}
+                      {ranks.map((rk) => {
+                        const r = RANKS[rk];
+                        if (!r) return null;
+                        return (
+                          <span key={rk} className="text-[10px] uppercase px-2 py-0.5 rounded-full border" style={{ color: r.color, borderColor: r.color }}>
+                            {r.label}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {isAdmin && <ChevronRight size={14} className="text-[#5B5866]" />}
+                  </div>
+                </Row>
               );
             })}
           </div>
@@ -1067,6 +1274,9 @@ function LeadersScreen({ isSuperAdmin }) {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
 
+  const [rankMembers, setRankMembers] = useState([]);
+  const [loadingRanks, setLoadingRanks] = useState(true);
+
   useEffect(() => {
     const unsub = onSnapshot(
       collection(db, "leaders"),
@@ -1077,6 +1287,23 @@ function LeadersScreen({ isSuperAdmin }) {
         setLoading(false);
       },
       () => { setError("No se pudo cargar la lista de líderes."); setLoading(false); }
+    );
+    return unsub;
+  }, []);
+
+  // Directorio de miembros aceptados, para agruparlos por rango debajo
+  // de la explicación de cada rango.
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, "directory"),
+      (snap) => {
+        const recs = snap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((m) => m.status === "accepted");
+        setRankMembers(recs);
+        setLoadingRanks(false);
+      },
+      () => setLoadingRanks(false)
     );
     return unsub;
   }, []);
@@ -1147,7 +1374,7 @@ function LeadersScreen({ isSuperAdmin }) {
 
   return (
     <div>
-      <TopBar title="Líderes" />
+      <TopBar title="Líderes y rangos" />
       <div className="text-sm text-[#96939F] mb-1">
         Cúpula y Alto Consejo — Los Jefes y Liderazgo Máximo
       </div>
@@ -1229,6 +1456,59 @@ function LeadersScreen({ isSuperAdmin }) {
             )}
           </div>
         ))}
+      </div>
+
+      <div className="mt-8 pt-6 border-t border-[#2A2C38]">
+        <div className="text-lg font-semibold mb-1">Rangos de la comunidad</div>
+        <p className="text-xs text-[#5B5866] mb-5">
+          Cada rango tiene un rol distinto dentro de Argyra. Aquí se explica qué hace cada uno
+          y quiénes lo conforman actualmente.
+        </p>
+
+        {loadingRanks && (
+          <div className="flex items-center gap-2 text-sm text-[#96939F] mb-4">
+            <Loader2 size={14} className="animate-spin" /> Cargando…
+          </div>
+        )}
+
+        {!loadingRanks && (
+          <div className="space-y-5">
+            {RANK_ORDER.map((rk) => {
+              const r = RANKS[rk];
+              const membersOfRank = rankMembers.filter((m) => userRanks(m).includes(rk));
+              return (
+                <div key={rk} className="rounded-xl border overflow-hidden" style={{ borderColor: `${r.color}55` }}>
+                  <div className="p-4" style={{ background: `${r.color}14` }}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold" style={{ color: r.color }}>{r.label}</span>
+                      <span className="text-[10px] uppercase tracking-wide" style={{ color: r.color }}>
+                        {membersOfRank.length} miembro{membersOfRank.length === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <div className="text-sm text-[#D8D5E0] mt-0.5">{r.title}</div>
+                    <p className="text-xs text-[#96939F] mt-2">{r.blurb}</p>
+                  </div>
+                  <div className="bg-[#16171F] p-3">
+                    {membersOfRank.length === 0 ? (
+                      <p className="text-xs text-[#5B5866] px-1 py-1">Todavía no hay miembros con este rango.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {membersOfRank.map((m) => (
+                          <span key={m.id} className="text-xs px-2.5 py-1 rounded-full border border-[#2A2C38] text-[#D8D5E0]">
+                            {m.nick || "Usuario"}
+                            {!!m.groupsManaged && (
+                              <span className="text-[#5B5866]"> · {m.groupsManaged} grupo{m.groupsManaged === 1 ? "" : "s"}</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1755,9 +2035,9 @@ export default function App() {
   }
 
   let body;
-  if (tab === "directory") body = <DirectoryScreen canView={record.status === "accepted" || isAdmin} myRanks={userRanks(record)} />;
+  if (tab === "directory") body = <DirectoryScreen canView={record.status === "accepted" || isAdmin} myRanks={userRanks(record)} isAdmin={isAdmin} />;
   else if (tab === "leaders") body = <LeadersScreen isSuperAdmin={isSuperAdmin} />;
-  else if (tab === "profile") body = <ProfileScreen record={record} onLogout={logout} />;
+  else if (tab === "profile") body = <ProfileScreen record={record} uid={user.uid} onLogout={logout} onSaved={refresh} />;
   else body = <HomeFeed isAdmin={isAdmin} />;
 
   return (
