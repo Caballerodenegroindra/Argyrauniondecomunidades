@@ -11,105 +11,123 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
-    // Solo el administrador principal fijo "indrhack" (no los demás admins
-    // que él otorgue) puede administrar la lista de Líderes / Alto Consejo.
+    // Solo "indrhack" puede otorgar/quitar el rol de Líder directamente
+    // desde datos sensibles (en la práctica los admins ya cubren la gestión
+    // diaria; se deja reservado para el admin principal).
     function isSuperAdmin() {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.nick.lower() == 'indrhack';
     }
 
-    // Solo cuentas ya aceptadas en la comunidad pueden ver la sección
-    // "Comunidad" (lista de miembros y grupos por rango).
     function isApprovedMember() {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/directory/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/directory/$(request.auth.uid)).data.status == 'accepted';
     }
 
-    // Mapeo nick -> {uid, email}. Necesita lectura pública porque el login
-    // por nick busca aquí ANTES de que la persona esté autenticada.
-    // Solo expone el correo asociado a un nick, nunca contraseñas
-    // (Firebase Auth jamás guarda ni expone contraseñas en Firestore).
+    // Mapeo nick -> {uid, email}. Lectura pública: el login por nick busca
+    // aquí antes de que la persona esté autenticada.
     match /usernames/{nick} {
       allow read: if true;
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.uid;
       allow update, delete: if false;
     }
 
-    // Perfil de cada usuario.
+    // Perfil privado de cada usuario (incluye teléfono/correo).
     match /users/{uid} {
       allow create: if isSignedIn() && request.auth.uid == uid;
       allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
-      // El dueño puede editar su propio perfil MIENTRAS no esté resuelto
-      // (para completar encuesta/enviar solicitud). Ya con status
-      // accepted/rejected, solo un admin puede tocar el documento
-      // (para asignar o cambiar rango).
+      // El dueño puede editar su propio perfil mientras no esté resuelto
+      // (encuesta de ingreso / términos) o para su teléfono; solo un admin
+      // puede tocar el documento una vez aceptado/rechazado o para
+      // asignar rol, rama, comunidad y sello.
       allow update: if isAdmin() || (
         request.auth.uid == uid &&
         resource.data.status != "accepted" &&
         resource.data.status != "rejected"
       ) || (
-        // Un miembro ya aceptado puede seguir actualizando SOLO cuántos
-        // grupos administra (no puede tocar su propio status/ranks así).
         request.auth.uid == uid &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["groupsManaged"])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["phone"])
       );
       allow delete: if isAdmin();
     }
 
-    // Directorio público de miembros: solo nick, rango(s) y estado (sin
-    // teléfono ni correo). Solo miembros ya aceptados (o admins) pueden
-    // ver la lista completa (para la sección "Comunidad"); cada quien
-    // crea su propia entrada al registrarse y solo un admin puede
-    // tocarla una vez resuelta.
+    // Directorio público reducido: nick, rol, rama(s), comunidad, sello,
+    // status. Sin teléfono ni correo. Visible para miembros ya aceptados
+    // y admins (se usa en Comunidades, Equipo y Líderes).
     match /directory/{uid} {
       allow read: if isApprovedMember() || isAdmin();
-      // El dueño crea su propia entrada al registrarse; un admin también
-      // puede crearla/actualizarla (por ejemplo, para "poner al día" a
-      // cuentas que ya existían antes de esta sección).
       allow create: if isSignedIn() && (request.auth.uid == uid || isAdmin());
       allow update: if isAdmin() || (
         request.auth.uid == uid &&
         resource.data.status != "accepted" &&
         resource.data.status != "rejected"
-      ) || (
-        request.auth.uid == uid &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["groupsManaged"])
       );
       allow delete: if isAdmin();
     }
 
-    // Grupos por función/proyecto (ej. "Grupo de Programación"). Cada uno
-    // puede estar restringido a uno o más rangos; si "ranks" está vacío,
-    // el grupo es visible para cualquier miembro aceptado.
-    match /groups/{id} {
+    // Comunidades y grupos independientes afiliados a Argyra.
+    match /communities/{id} {
       allow read: if isSignedIn();
       allow create, update, delete: if isAdmin();
+
+      // Embajada: espacio privado de cada comunidad. Solo lo leen/escriben
+      // miembros de esa comunidad, líderes, coordinadores de Relaciones
+      // Externas, o admins.
+      match /embassy/{msgId} {
+        function myProfile() {
+          return get(/databases/$(database)/documents/directory/$(request.auth.uid)).data;
+        }
+        function canAccessEmbassy() {
+          return isSignedIn() && (
+            isAdmin() ||
+            (isApprovedMember() && myProfile().communityId == id) ||
+            (isApprovedMember() && myProfile().role == 'lider') ||
+            (isApprovedMember() && myProfile().role == 'coordinador' &&
+              ('relaciones' in myProfile().branches))
+          );
+        }
+        allow read, create: if canAccessEmbassy();
+        allow update, delete: if isAdmin();
+      }
     }
 
-    // Noticias / información de la comunidad que se ve al iniciar sesión.
-    // Cualquier admin (indrhack u otro admin otorgado) puede publicar.
+    // Directorio Central: anuncios globales o por comunidad.
+    match /announcements/{id} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (
+        isAdmin() || (
+          isApprovedMember() &&
+          exists(/databases/$(database)/documents/directory/$(request.auth.uid)) &&
+          (
+            get(/databases/$(database)/documents/directory/$(request.auth.uid)).data.role == 'lider' ||
+            (
+              get(/databases/$(database)/documents/directory/$(request.auth.uid)).data.role == 'coordinador' &&
+              ('relaciones' in get(/databases/$(database)/documents/directory/$(request.auth.uid)).data.branches)
+            )
+          )
+        )
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    // Sistema de pase: solicitud para ser Coordinador de una rama.
+    match /passRequests/{id} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Noticias generales (compatibilidad; ya no se usa como pantalla
+    // principal, reemplazada por Directorio Central / announcements).
     match /news/{id} {
       allow read: if isSignedIn();
       allow create, update, delete: if isAdmin();
     }
 
-    // Cúpula y Alto Consejo. Cada entrada guarda una copia del nombre y
-    // teléfono del usuario líder para poder mostrarlo y contactarlo por
-    // WhatsApp. Solo "indrhack" (isSuperAdmin) puede agregar o quitar
-    // líderes; cualquier persona con cuenta puede ver la lista.
-    match /leaders/{uid} {
-      allow read: if isSignedIn();
-      allow write: if isSuperAdmin();
-    }
-
     // Lista de administradores.
-    // - "indrhack" es el admin principal: se auto-otorga el acceso la
-    //   primera vez que inicia sesión (bootstrap), y solo puede hacerlo
-    //   para su propia cuenta.
-    // - Cualquier administrador ya existente puede otorgar o quitar el
-    //   acceso a otras personas desde el panel.
     match /admins/{uid} {
       allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
       allow create: if isAdmin() || (
