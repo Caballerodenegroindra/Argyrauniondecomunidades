@@ -19,6 +19,14 @@ service cloud.firestore {
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.nick.lower() == 'indrhack';
     }
 
+    // Solo cuentas ya aceptadas en la comunidad pueden ver la sección
+    // "Comunidad" (lista de miembros y grupos por rango).
+    function isApprovedMember() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/directory/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/directory/$(request.auth.uid)).data.status == 'accepted';
+    }
+
     // Mapeo nick -> {uid, email}. Necesita lectura pública porque el login
     // por nick busca aquí ANTES de que la persona esté autenticada.
     // Solo expone el correo asociado a un nick, nunca contraseñas
@@ -45,19 +53,13 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Enlaces de WhatsApp por rango: cualquier usuario autenticado los lee
-    // (para ver los suyos en su perfil); solo un admin los edita.
-    match /config/rankLinks {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
-    }
-
-    // Directorio público de miembros: solo nick, rango y estado (sin
-    // teléfono ni correo). Cualquier persona con cuenta puede ver la lista
-    // completa (para la sección "Comunidad"); cada quien crea su propia
-    // entrada al registrarse y solo un admin puede tocarla una vez resuelta.
+    // Directorio público de miembros: solo nick, rango(s) y estado (sin
+    // teléfono ni correo). Solo miembros ya aceptados (o admins) pueden
+    // ver la lista completa (para la sección "Comunidad"); cada quien
+    // crea su propia entrada al registrarse y solo un admin puede
+    // tocarla una vez resuelta.
     match /directory/{uid} {
-      allow read: if isSignedIn();
+      allow read: if isApprovedMember() || isAdmin();
       // El dueño crea su propia entrada al registrarse; un admin también
       // puede crearla/actualizarla (por ejemplo, para "poner al día" a
       // cuentas que ya existían antes de esta sección).
@@ -68,6 +70,14 @@ service cloud.firestore {
         resource.data.status != "rejected"
       );
       allow delete: if isAdmin();
+    }
+
+    // Grupos por función/proyecto (ej. "Grupo de Programación"). Cada uno
+    // puede estar restringido a uno o más rangos; si "ranks" está vacío,
+    // el grupo es visible para cualquier miembro aceptado.
+    match /groups/{id} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
     }
 
     // Noticias / información de la comunidad que se ve al iniciar sesión.
