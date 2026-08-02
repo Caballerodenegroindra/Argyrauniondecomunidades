@@ -4,7 +4,7 @@ import {
   CheckCircle2, XCircle, ChevronRight, ChevronDown, LogOut, Settings, ClipboardList,
   ExternalLink, AlertCircle, Loader2, Home, Newspaper, Crown,
   MessageCircle, Plus, Trash2, ArrowLeft, X, Building2, FlaskConical,
-  ShieldCheck, Globe2, Smile, Megaphone, Stamp, Send, Landmark, UserPlus,
+  ShieldCheck, Globe2, Smile, Megaphone, Stamp, Send, Landmark, UserPlus, HelpCircle,
 } from "lucide-react";
 import {
   createUserWithEmailAndPassword,
@@ -245,7 +245,7 @@ function GhostButton({ children, className, ...props }) {
   );
 }
 
-function Shell({ children, wide }) {
+function Shell({ children, wide, withUserBar, compactHeader }) {
   return (
     <div className="min-h-screen w-full bg-[#0C0D12] text-[#F2F0EB] relative overflow-hidden">
       <div className="pointer-events-none absolute -top-24 -right-24 w-[420px] h-[420px] rounded-full border border-[#2A2C38] opacity-40" />
@@ -254,15 +254,17 @@ function Shell({ children, wide }) {
         className="pointer-events-none fixed inset-0 bg-center bg-no-repeat opacity-[0.06]"
         style={{ backgroundImage: `url(${argyraLogo})`, backgroundSize: "min(70vw, 620px)" }}
       />
-      <div className="relative z-10 min-h-screen flex flex-col items-center px-4 py-10">
-        <div className="mb-8 text-center">
-          <div className="text-2xl tracking-[0.25em]" style={{ fontFamily: "'Cinzel', serif", color: "#C9A036" }}>
-            ARGYRA
+      <div className={cx("relative z-10 min-h-screen flex flex-col items-center px-4 py-10", withUserBar && "pt-16")}>
+        {!compactHeader && (
+          <div className="mb-8 text-center">
+            <div className="text-2xl tracking-[0.25em]" style={{ fontFamily: "'Cinzel', serif", color: "#C9A036" }}>
+              ARGYRA
+            </div>
+            <div className="text-[11px] tracking-[0.2em] uppercase text-[#96939F] mt-1">
+              Unión de comunidades
+            </div>
           </div>
-          <div className="text-[11px] tracking-[0.2em] uppercase text-[#96939F] mt-1">
-            Unión de comunidades
-          </div>
-        </div>
+        )}
         <div className={cx("w-full", wide ? "max-w-lg" : "max-w-md")}>{children}</div>
       </div>
     </div>
@@ -361,6 +363,42 @@ function EmptyState({ text }) {
   return <div className="text-sm text-[#5B5866] text-center py-8">{text}</div>;
 }
 
+function HelpButton({ text }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        aria-label="Ayuda de esta sección"
+        className="w-7 h-6 shrink-0 flex items-center justify-center rounded-md border border-[#2A2C38] text-[#96939F] hover:border-[#6C6CF0] hover:text-[#6C6CF0] transition-colors"
+      >
+        <HelpCircle size={14} />
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm px-4 pb-4 sm:pb-4"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="bg-[#16171F] border border-[#2A2C38] rounded-2xl p-5 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <HelpCircle size={16} className="text-[#6C6CF0]" /> ¿Para qué es esta sección?
+              </div>
+              <button onClick={() => setOpen(false)} className="w-6 h-6 flex items-center justify-center rounded-md border border-[#2A2C38] text-[#96939F]">
+                <X size={13} />
+              </button>
+            </div>
+            <p className="text-sm text-[#96939F] leading-relaxed whitespace-pre-line">{text}</p>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function TopBar({ title, onBack, right }) {
   return (
     <div className="flex items-center gap-3 mb-5">
@@ -377,29 +415,48 @@ function TopBar({ title, onBack, right }) {
 
 function BottomNav({ tab, setTab, isAdmin }) {
   const items = [
-    { key: "home", label: "Directorio", icon: Newspaper },
-    { key: "communities", label: "Comunidades", icon: Building2 },
+    { key: "home", label: "Inicio", icon: Newspaper },
+    { key: "communities", label: "Comunid.", icon: Building2 },
     { key: "team", label: "Equipo", icon: Users },
+    { key: "pase", label: "Pase", icon: Stamp },
     { key: "leaders", label: "Líderes", icon: Crown },
     { key: "profile", label: "Perfil", icon: UserIcon },
   ];
   if (isAdmin) items.push({ key: "admin", label: "Admin", icon: Shield });
   return (
     <div className="fixed bottom-0 left-0 right-0 z-20 bg-[#12131A]/95 backdrop-blur border-t border-[#2A2C38]">
-      <div className="max-w-lg mx-auto flex overflow-x-auto">
+      <div className="max-w-lg mx-auto grid" style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
         {items.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
             onClick={() => setTab(key)}
             className={cx(
-              "flex-1 min-w-[64px] flex flex-col items-center gap-1 py-2.5 text-[10px] uppercase tracking-wide transition-colors",
+              "min-w-0 flex flex-col items-center justify-center gap-0.5 py-2 px-0.5 transition-colors",
               tab === key ? "text-[#6C6CF0]" : "text-[#5B5866] hover:text-[#96939F]"
             )}
           >
-            <Icon size={18} />
-            {label}
+            <Icon size={17} />
+            <span className="block w-full text-center text-[9px] leading-none whitespace-nowrap overflow-hidden text-ellipsis">
+              {label}
+            </span>
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function TopUserBar({ nick, role }) {
+  return (
+    <div className="fixed top-0 left-0 right-0 z-30 bg-[#12131A]/95 backdrop-blur border-b border-[#2A2C38]">
+      <div className="max-w-lg mx-auto flex items-center justify-between px-4 py-2">
+        <span className="text-[11px] tracking-[0.2em] uppercase" style={{ fontFamily: "'Cinzel', serif", color: "#C9A036" }}>
+          Argyra
+        </span>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-sm text-[#F2F0EB] truncate max-w-[120px]">{nick}</span>
+          <RoleBadge role={role} />
+        </div>
       </div>
     </div>
   );
@@ -716,7 +773,7 @@ function ProfileScreen({ record, uid, onLogout, onSaved, community }) {
 
   return (
     <div>
-      <TopBar title="Mi perfil" />
+      <TopBar title="Mi perfil" right={<HelpButton text="Aquí ves y editas tu información: tu rango actual, tu comunidad (si tienes), el Sello Argyra y tu teléfono de contacto. También es donde cierras sesión." />} />
       <SectionCard>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-12 h-12 rounded-full bg-[#1D1F2A] border border-[#2A2C38] flex items-center justify-center text-lg font-semibold" style={{ color: "#C9A036" }}>
@@ -799,9 +856,14 @@ function DirectorioCentralScreen({ isAdmin, record, communities }) {
 
   return (
     <div>
-      <TopBar title="Directorio Central" right={canPost && (
-        <button onClick={() => setShowForm((s) => !s)} className="text-[#6C6CF0]"><Plus size={20} /></button>
-      )} />
+      <TopBar title="Directorio Central" right={
+        <div className="flex items-center gap-1.5">
+          {canPost && (
+            <button onClick={() => setShowForm((s) => !s)} className="w-7 h-6 flex items-center justify-center rounded-md border border-[#2A2C38] text-[#6C6CF0] hover:border-[#6C6CF0]"><Plus size={15} /></button>
+          )}
+          <HelpButton text="Anuncios compartidos entre todas las comunidades de Argyra. Un anuncio puede ser para 'Toda Argyra' o dirigido a una comunidad específica. Publican aquí los admins, Líderes y Coordinadores de Relaciones Externas." />
+        </div>
+      } />
       <p className="text-xs text-[#5B5866] mb-4">Anuncios entre comunidades. Aquí se comparten novedades a toda Argyra o a comunidades específicas.</p>
 
       {showForm && (
@@ -885,7 +947,7 @@ function CommunitiesScreen({ record, isAdmin }) {
 
   return (
     <div>
-      <TopBar title="Comunidades" />
+      <TopBar title="Comunidades" right={<HelpButton text="Lista de todas las comunidades y grupos independientes afiliados a Argyra. Toca cualquiera para ver su información (líder, embajadores, subcomunidades, estado) y, si tienes acceso, su Embajada privada." />} />
       <p className="text-xs text-[#5B5866] mb-4">Comunidades y grupos independientes afiliados a Argyra.</p>
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
@@ -925,7 +987,7 @@ function CommunityDetail({ community: c, onBack, record, isAdmin, members }) {
 
   return (
     <div>
-      <TopBar title={c.name} onBack={onBack} />
+      <TopBar title={c.name} onBack={onBack} right={<HelpButton text="Información: datos de la comunidad (líder, embajadores, subcomunidades, fecha del Sello y estado) y sus miembros por rango. Embajada: espacio privado solo para miembros de esta comunidad, sus embajadores, Líderes y Coordinadores de Relaciones Externas." />} />
       <div className="flex mb-4 bg-[#1D1F2A] rounded-lg p-1">
         <button onClick={() => setTab("info")} className={cx("flex-1 text-xs py-2 rounded-md transition-colors", tab === "info" ? "bg-[#6C6CF0] text-white" : "text-[#96939F]")}>Información</button>
         {canSeeEmbassy && (
@@ -1075,7 +1137,7 @@ function TeamScreen() {
 
   return (
     <div>
-      <TopBar title="Ramas de Argyra" />
+      <TopBar title="Ramas de Argyra" right={<HelpButton text="Las 5 ramas funcionales que sostienen el proyecto: Laboratorio, Guardia y Expansión, Relaciones Externas, Comunidad Casual y Publicidad. Aquí ves quién coordina cada una y quién forma parte del equipo directo de Argyra (sin comunidad detrás)." />} />
       <p className="text-xs text-[#5B5866] mb-4">El equipo que sostiene el proyecto, organizado por rama funcional.</p>
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
@@ -1149,7 +1211,7 @@ function LeadersScreen() {
 
   return (
     <div>
-      <TopBar title="Líderes" />
+      <TopBar title="Líderes" right={<HelpButton text="Los Líderes son la autoridad máxima de todo el proyecto Argyra, ya sea que vengan de una comunidad o del equipo directo. Este listado es solo informativo." />} />
       <p className="text-xs text-[#5B5866] mb-4">Autoridad máxima de todo el proyecto Argyra.</p>
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
@@ -1207,7 +1269,7 @@ function PaseScreen({ record, uid }) {
 
   return (
     <div>
-      <TopBar title="Sistema de pase" />
+      <TopBar title="Sistema de pase" right={<HelpButton text="Aquí pides subir de rango a Coordinador de una rama. Llena el formulario explicando por qué; un admin revisa tu solicitud y, si la aprueba, tu rol cambia automáticamente." />} />
       <p className="text-xs text-[#5B5866] mb-4">Formulario para validar tu liderazgo antes de entrar como Coordinador de una rama.</p>
 
       {alreadyCoordinatorOrLeader ? (
@@ -1576,7 +1638,7 @@ function AdminsManager({ currentUid, isSuperAdmin }) {
 
 /* ---------------- Panel de Admin ---------------- */
 
-function AdminPanel({ onExit, currentUid, isSuperAdmin }) {
+function AdminPanel({ onExit, currentUid, isSuperAdmin, nick, role }) {
   const [section, setSection] = useState("requests");
   const [communities, setCommunities] = useState([]);
   const [people, setPeople] = useState([]);
@@ -1599,9 +1661,10 @@ function AdminPanel({ onExit, currentUid, isSuperAdmin }) {
   ];
 
   return (
-    <Shell wide>
+    <Shell wide withUserBar compactHeader>
+      <TopUserBar nick={nick} role={role} />
       <div className="w-full pb-4">
-        <TopBar title="Panel de administración" onBack={onExit} />
+        <TopBar title="Panel de administración" onBack={onExit} right={<HelpButton text="Panel solo para admins. Solicitudes: acepta o rechaza ingresos nuevos. Comunidades: crea/edita comunidades y grupos. Personas: asigna rol, comunidad, rama y Sello. Pases: aprueba solicitudes de Coordinador. Admins: otorga o quita acceso de administrador." />} />
         <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
           {sections.map((s) => (
             <button key={s.key} onClick={() => setSection(s.key)}
@@ -1638,7 +1701,13 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [record, setRecord] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [tab, setTab] = useState("home");
+  const [tab, setTabState] = useState(() => {
+    try { return localStorage.getItem("argyra_tab") || "home"; } catch (e) { return "home"; }
+  });
+  const setTab = useCallback((next) => {
+    setTabState(next);
+    try { localStorage.setItem("argyra_tab", next); } catch (e) {}
+  }, []);
   const [community, setCommunity] = useState(null);
   const [communities, setCommunities] = useState([]);
 
@@ -1731,18 +1800,20 @@ export default function App() {
 
   if (tab === "admin") {
     if (!isAdmin) return <NoAdminAccess onExit={() => setTab("home")} />;
-    return <AdminPanel onExit={() => setTab("home")} currentUid={user.uid} isSuperAdmin={isSuperAdmin} />;
+    return <AdminPanel onExit={() => setTab("home")} currentUid={user.uid} isSuperAdmin={isSuperAdmin} nick={record.nick} role={record.role} />;
   }
 
   let body;
   if (tab === "communities") body = <CommunitiesScreen record={record} isAdmin={isAdmin} />;
   else if (tab === "team") body = <TeamScreen />;
+  else if (tab === "pase") body = <PaseScreen record={record} uid={user.uid} />;
   else if (tab === "leaders") body = <LeadersScreen />;
   else if (tab === "profile") body = <ProfileScreen record={record} uid={user.uid} onLogout={logout} onSaved={refresh} community={community} />;
   else body = <DirectorioCentralScreen isAdmin={isAdmin} record={record} communities={communities} />;
 
   return (
-    <Shell wide={tab === "communities"}>
+    <Shell wide={tab === "communities"} withUserBar compactHeader>
+      <TopUserBar nick={record.nick} role={record.role} />
       <div className="w-full pb-16">{body}</div>
       <BottomNav tab={tab} setTab={setTab} isAdmin={isAdmin} />
     </Shell>
