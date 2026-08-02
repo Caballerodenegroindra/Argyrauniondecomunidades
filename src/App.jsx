@@ -59,7 +59,7 @@ import argyraLogo from "./assets/argyra-logo.png";
 const BRANCHES = {
   laboratorio: {
     key: "laboratorio", label: "Laboratorio", icon: FlaskConical, color: "#6C6CF0",
-    blurb: "Investigación, herramientas y proyectos nuevos de la comunidad.",
+    blurb: "Programación, diseño y desarrollo: creación y modificación de páginas web, apps y otros proyectos técnicos de la comunidad.",
   },
   guardia: {
     key: "guardia", label: "Guardia y Expansión", icon: ShieldCheck, color: "#8C2F39",
@@ -417,7 +417,7 @@ function BottomNav({ tab, setTab, isAdmin }) {
   const items = [
     { key: "home", label: "Inicio", icon: Newspaper },
     { key: "communities", label: "Comunid.", icon: Building2 },
-    { key: "team", label: "Equipo", icon: Users },
+    { key: "team", label: "Ramas", icon: Users },
     { key: "pase", label: "Pase", icon: Stamp },
     { key: "leaders", label: "Líderes", icon: Crown },
     { key: "profile", label: "Perfil", icon: UserIcon },
@@ -966,8 +966,11 @@ function CommunitiesScreen({ record, isAdmin }) {
               <div className="text-xs text-[#96939F] mb-2">
                 {c.kind === "independiente" ? "Grupo independiente" : `Comunidad · ${c.subcommunities?.length || 0} subcomunidad(es)`}
               </div>
+              <div className="flex items-center gap-1.5 mb-2 text-xs" style={{ color: "#C9A036" }}>
+                <Crown size={13} />
+                <span>Admin/Líder: <span className="font-semibold">{c.leaderName || "Sin asignar"}</span></span>
+              </div>
               <div className="flex items-center justify-between text-[11px] text-[#5B5866]">
-                <span>Líder: {c.leaderName || "—"}</span>
                 <span>Sello: {formatDate(c.sealDate)}</span>
               </div>
             </SectionCard>
@@ -1120,8 +1123,59 @@ function EmbassyPanel({ communityId, record }) {
 
 /* ---------------- Equipo (ramas funcionales de Argyra) ---------------- */
 
-function TeamScreen() {
+function BranchCard({ bk, coords, info, isAdmin }) {
+  const b = BRANCHES[bk];
+  const Icon = b.icon;
+  const [editing, setEditing] = useState(false);
+  const [link, setLink] = useState(info?.link || "");
+  const [text, setText] = useState(info?.info || "");
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await setDoc(doc(db, "branchInfo", bk), { link: link.trim(), info: text.trim() }, { merge: true });
+      setEditing(false);
+    } catch (e) {}
+    setSaving(false);
+  };
+
+  return (
+    <SectionCard title={b.label} icon={Icon} right={isAdmin && (
+      <button onClick={() => setEditing((s) => !s)} className="w-7 h-6 flex items-center justify-center rounded-md border border-[#2A2C38] text-[#96939F] hover:border-[#6C6CF0] hover:text-[#6C6CF0]">
+        <Settings size={13} />
+      </button>
+    )}>
+      <p className="text-xs text-[#96939F] mb-2">{info?.info?.trim() ? info.info : b.blurb}</p>
+      {info?.link ? (
+        <a href={info.link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[#6C6CF0] mb-3">
+          <ExternalLink size={12} /> Enlace del grupo
+        </a>
+      ) : null}
+
+      {editing && (
+        <div className="mb-3 border-t border-[#2A2C38] pt-3">
+          <Field label="Enlace del grupo (WhatsApp, Discord, etc.)" placeholder="https://..." value={link} onChange={(e) => setLink(e.target.value)} />
+          <TextArea label="Descripción de la rama" value={text} onChange={(e) => setText(e.target.value)} placeholder={b.blurb} />
+          <PrimaryButton onClick={save} disabled={saving} className="py-1.5 text-xs">{saving ? <Loader2 size={14} className="animate-spin" /> : "Guardar"}</PrimaryButton>
+        </div>
+      )}
+
+      <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1">Coordinadores</div>
+      {coords.length === 0 ? (
+        <div className="text-xs text-[#5B5866]">Sin coordinador asignado.</div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {coords.map((p) => <span key={p.uid} className="text-xs px-2.5 py-1 rounded-full border" style={{ color: b.color, borderColor: b.color }}>{p.nick}</span>)}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+function TeamScreen({ isAdmin }) {
   const [people, setPeople] = useState([]);
+  const [branchInfo, setBranchInfo] = useState({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1133,33 +1187,28 @@ function TeamScreen() {
     return unsub;
   }, []);
 
-  const direct = people.filter((p) => !p.communityId && p.status === "accepted");
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "branchInfo"), (snap) => {
+      const map = {};
+      snap.docs.forEach((d) => { map[d.id] = d.data(); });
+      setBranchInfo(map);
+    }, () => {});
+    return unsub;
+  }, []);
+
+  const accepted = people.filter((p) => p.status === "accepted");
+  const direct = accepted.filter((p) => !p.communityId);
 
   return (
     <div>
-      <TopBar title="Ramas de Argyra" right={<HelpButton text="Las 5 ramas funcionales que sostienen el proyecto: Laboratorio, Guardia y Expansión, Relaciones Externas, Comunidad Casual y Publicidad. Aquí ves quién coordina cada una y quién forma parte del equipo directo de Argyra (sin comunidad detrás)." />} />
+      <TopBar title="Ramas de Argyra" right={<HelpButton text="Las 5 ramas funcionales que sostienen el proyecto: Laboratorio, Guardia y Expansión, Relaciones Externas, Comunidad Casual y Publicidad. Aquí ves para qué sirve cada una, su enlace de grupo (si lo tiene) y quién la coordina." />} />
       <p className="text-xs text-[#5B5866] mb-4">El equipo que sostiene el proyecto, organizado por rama funcional.</p>
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
       ) : (
         BRANCH_ORDER.map((bk) => {
-          const b = BRANCHES[bk];
-          const Icon = b.icon;
-          const coords = direct.filter((p) => p.role === "coordinador" && p.branches?.includes(bk));
-          const others = direct.filter((p) => p.role !== "coordinador" && p.role !== "lider");
-          return (
-            <SectionCard key={bk} title={b.label} icon={Icon}>
-              <p className="text-xs text-[#96939F] mb-3">{b.blurb}</p>
-              <div className="text-[11px] uppercase tracking-wide text-[#5B5866] mb-1">Coordinadores</div>
-              {coords.length === 0 ? (
-                <div className="text-xs text-[#5B5866] mb-2">Sin coordinador asignado.</div>
-              ) : (
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {coords.map((p) => <span key={p.uid} className="text-xs px-2.5 py-1 rounded-full border" style={{ color: b.color, borderColor: b.color }}>{p.nick}</span>)}
-                </div>
-              )}
-            </SectionCard>
-          );
+          const coords = accepted.filter((p) => p.role === "coordinador" && p.branches?.includes(bk));
+          return <BranchCard key={bk} bk={bk} coords={coords} info={branchInfo[bk]} isAdmin={isAdmin} />;
         })
       )}
       <SectionCard title="Equipo directo (sin comunidad)" icon={Users}>
@@ -1194,7 +1243,7 @@ function LeadersScreen() {
   useEffect(() => {
     const q = query(collection(db, "directory"));
     const unsub = onSnapshot(q, (snap) => {
-      setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.role === "lider"));
+      setPeople(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.status === "accepted"));
       setLoading(false);
     }, () => setLoading(false));
     return unsub;
@@ -1209,26 +1258,58 @@ function LeadersScreen() {
     })();
   }, []);
 
+  const leaders = people.filter((p) => p.role === "lider");
+  const communityCoordinators = people.filter((p) => p.role === "coordinador" && p.communityId);
+  const byCommunity = {};
+  communityCoordinators.forEach((p) => {
+    if (!byCommunity[p.communityId]) byCommunity[p.communityId] = [];
+    byCommunity[p.communityId].push(p);
+  });
+
   return (
     <div>
-      <TopBar title="Líderes" right={<HelpButton text="Los Líderes son la autoridad máxima de todo el proyecto Argyra, ya sea que vengan de una comunidad o del equipo directo. Este listado es solo informativo." />} />
+      <TopBar title="Líderes" right={<HelpButton text="Los Líderes son la autoridad máxima de todo el proyecto Argyra, vengan de una comunidad o del equipo directo. Abajo también verás a los Coordinadores que pertenecen a cada comunidad." />} />
       <p className="text-xs text-[#5B5866] mb-4">Autoridad máxima de todo el proyecto Argyra.</p>
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-[#96939F] justify-center py-8"><Loader2 size={16} className="animate-spin" /> Cargando…</div>
-      ) : people.length === 0 ? (
-        <EmptyState text="Sin líderes registrados todavía." />
       ) : (
-        people.map((p) => (
-          <SectionCard key={p.uid}>
-            <div className="flex items-center gap-3">
-              <Crown size={20} style={{ color: "#C9A036" }} />
-              <div>
-                <div className="font-semibold text-sm">{p.nick}</div>
-                <div className="text-xs text-[#96939F]">{p.communityId ? communities[p.communityId] || "Comunidad" : "Equipo directo de Argyra"}</div>
-              </div>
-            </div>
-          </SectionCard>
-        ))
+        <>
+          {leaders.length === 0 ? (
+            <EmptyState text="Sin líderes registrados todavía." />
+          ) : (
+            leaders.map((p) => (
+              <SectionCard key={p.uid}>
+                <div className="flex items-center gap-3">
+                  <Crown size={20} style={{ color: "#C9A036" }} />
+                  <div>
+                    <div className="font-semibold text-sm">{p.nick}</div>
+                    <div className="text-xs text-[#96939F]">{p.communityId ? communities[p.communityId] || "Comunidad" : "Equipo directo de Argyra"}</div>
+                  </div>
+                </div>
+              </SectionCard>
+            ))
+          )}
+
+          <div className="text-sm font-semibold mt-6 mb-2">Coordinadores por comunidad</div>
+          {Object.keys(byCommunity).length === 0 ? (
+            <EmptyState text="Ninguna comunidad tiene Coordinadores todavía." />
+          ) : (
+            Object.entries(byCommunity).map(([cid, coords]) => (
+              <SectionCard key={cid} title={communities[cid] || "Comunidad"} icon={Building2}>
+                <div className="space-y-1.5">
+                  {coords.map((p) => (
+                    <div key={p.uid} className="flex items-center justify-between text-sm">
+                      <span>{p.nick}</span>
+                      <div className="flex flex-wrap gap-1 justify-end">
+                        {(p.branches || []).map((bk) => <BranchChip key={bk} branchKey={bk} />)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </SectionCard>
+            ))
+          )}
+        </>
       )}
     </div>
   );
@@ -1249,8 +1330,10 @@ function PaseScreen({ record, uid }) {
     return unsub;
   }, [uid]);
 
-  const hasPending = myRequests.some((r) => r.status === "pending");
-  const alreadyCoordinatorOrLeader = record.role === "coordinador" || record.role === "lider";
+  const myBranches = record.branches || [];
+  const pendingBranches = myRequests.filter((r) => r.status === "pending").map((r) => r.branchRequested);
+  const availableBranches = BRANCH_ORDER.filter((bk) => !myBranches.includes(bk) && !pendingBranches.includes(bk));
+  const isLeader = record.role === "lider";
 
   const submit = async () => {
     setError("");
@@ -1269,19 +1352,27 @@ function PaseScreen({ record, uid }) {
 
   return (
     <div>
-      <TopBar title="Sistema de pase" right={<HelpButton text="Aquí pides subir de rango a Coordinador de una rama. Llena el formulario explicando por qué; un admin revisa tu solicitud y, si la aprueba, tu rol cambia automáticamente." />} />
-      <p className="text-xs text-[#5B5866] mb-4">Formulario para validar tu liderazgo antes de entrar como Coordinador de una rama.</p>
+      <TopBar title="Sistema de pase" right={<HelpButton text="Aquí pides subir de rango a Coordinador de una rama. Puedes postular a más de una rama: llena el formulario explicando por qué, y un admin revisa cada solicitud por separado." />} />
+      <p className="text-xs text-[#5B5866] mb-4">Formulario para validar tu liderazgo antes de entrar como Coordinador de una rama. Puedes postular a varias ramas.</p>
 
-      {alreadyCoordinatorOrLeader ? (
-        <SectionCard><div className="text-sm text-[#4E9A6B] flex items-center gap-2"><CheckCircle2 size={16} /> Ya tienes un rol de Coordinador o Líder.</div></SectionCard>
-      ) : hasPending ? (
-        <SectionCard><div className="text-sm text-[#C9A036] flex items-center gap-2"><Loader2 size={16} /> Tu pase está en revisión.</div></SectionCard>
+      {myBranches.length > 0 && (
+        <SectionCard title="Ya coordinas" icon={CheckCircle2}>
+          <div className="flex flex-wrap gap-1.5">
+            {myBranches.map((bk) => <BranchChip key={bk} branchKey={bk} />)}
+          </div>
+        </SectionCard>
+      )}
+
+      {isLeader ? (
+        <SectionCard><div className="text-sm text-[#4E9A6B] flex items-center gap-2"><CheckCircle2 size={16} /> Ya eres Líder, tienes autoridad sobre todas las ramas.</div></SectionCard>
+      ) : availableBranches.length === 0 ? (
+        <SectionCard><div className="text-sm text-[#C9A036] flex items-center gap-2"><Loader2 size={16} /> No tienes ramas disponibles para postular ahora mismo (ya las coordinas o están en revisión).</div></SectionCard>
       ) : (
         <SectionCard title="Solicitar pase" icon={Stamp}>
           <div className="mb-4">
             <span className="block text-xs tracking-wide uppercase text-[#96939F] mb-1.5">Rama que quieres coordinar</span>
             <div className="grid grid-cols-1 gap-2">
-              {BRANCH_ORDER.map((bk) => {
+              {availableBranches.map((bk) => {
                 const b = BRANCHES[bk];
                 const active = branch === bk;
                 return (
@@ -1295,6 +1386,14 @@ function PaseScreen({ record, uid }) {
           <TextArea label="Motivación" value={motivation} onChange={(e) => setMotivation(e.target.value)} placeholder="¿Por qué deberías coordinar esta rama?" />
           {error && <div className="flex items-center gap-2 text-sm text-[#E07A7A] mb-4"><AlertCircle size={14} /> {error}</div>}
           <PrimaryButton onClick={submit} disabled={busy}>{busy ? <Loader2 size={16} className="animate-spin" /> : "Enviar pase"}</PrimaryButton>
+        </SectionCard>
+      )}
+
+      {pendingBranches.length > 0 && (
+        <SectionCard title="En revisión" icon={Loader2}>
+          <div className="flex flex-wrap gap-1.5">
+            {pendingBranches.map((bk) => <BranchChip key={bk} branchKey={bk} />)}
+          </div>
         </SectionCard>
       )}
 
@@ -1449,17 +1548,29 @@ function PersonRow({ user, communities }) {
   const [branches, setBranches] = useState(user.branches || []);
   const [communityId, setCommunityId] = useState(user.communityId || "");
   const [sealActive, setSealActive] = useState(user.sello?.active ?? false);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState(null); // { ok: bool, text: string }
 
   const toggleBranch = (b) => setBranches((bs) => bs.includes(b) ? bs.filter((x) => x !== b) : [...bs, b]);
 
   const save = async () => {
+    setSaving(true);
+    setFeedback(null);
     const sello = { active: sealActive, date: sealActive ? (user.sello?.date || new Date().toISOString()) : null };
     const payload = {
       role, branches: role === "coordinador" ? branches : [],
       communityId: communityId || null, sello,
     };
-    await updateDoc(doc(db, "users", user.uid), payload);
-    await syncDirectory(user.uid, { role: payload.role, branches: payload.branches, communityId: payload.communityId, sello });
+    try {
+      await updateDoc(doc(db, "users", user.uid), payload);
+      await setDoc(doc(db, "directory", user.uid), {
+        role: payload.role, branches: payload.branches, communityId: payload.communityId, sello,
+      }, { merge: true });
+      setFeedback({ ok: true, text: "Guardado." });
+    } catch (e) {
+      setFeedback({ ok: false, text: firebaseErrorToMessage(e) || "No se pudo guardar." });
+    }
+    setSaving(false);
   };
 
   return (
@@ -1490,7 +1601,12 @@ function PersonRow({ user, communities }) {
         <input type="checkbox" checked={sealActive} onChange={(e) => setSealActive(e.target.checked)} />
         Sello Argyra activo
       </label>
-      <PrimaryButton onClick={save} className="py-1.5 text-xs">Guardar</PrimaryButton>
+      {feedback && (
+        <div className={cx("text-xs mb-2", feedback.ok ? "text-[#4E9A6B]" : "text-[#E07A7A]")}>{feedback.text}</div>
+      )}
+      <PrimaryButton onClick={save} disabled={saving} className="py-1.5 text-xs">
+        {saving ? <Loader2 size={14} className="animate-spin" /> : "Guardar"}
+      </PrimaryButton>
     </div>
   );
 }
@@ -1512,31 +1628,47 @@ function PeopleManager({ communities }) {
 
 function RequestsManager({ communities }) {
   const [requests, setRequests] = useState([]);
+  const [busyUid, setBusyUid] = useState(null);
+  const [errors, setErrors] = useState({});
   useEffect(() => {
     const unsub = onSnapshot(query(collection(db, "users")), (snap) => setRequests(snap.docs.map((d) => ({ uid: d.id, ...d.data() })).filter((p) => p.status === "submitted")), () => {});
     return unsub;
   }, []);
 
   const accept = async (u) => {
-    let communityId = u.communityId || null;
-    let role = "nuevo";
-    if (u.affiliation === "new-community" && u.pendingCommunityName) {
-      const ref = await addDoc(collection(db, "communities"), {
-        name: u.pendingCommunityName, kind: u.pendingCommunityKind || "comunidad",
-        subcommunities: [], leaderUid: u.uid, leaderName: u.nick, leaderPhone: u.phone || "",
-        ambassadorMainUid: null, ambassadorMainName: "", ambassadorAltUid: null, ambassadorAltName: "",
-        sealDate: new Date().toISOString(), status: "activa", notes: "", createdAt: Date.now(),
-      });
-      communityId = ref.id;
-      role = "lider";
+    setBusyUid(u.uid);
+    setErrors((e) => ({ ...e, [u.uid]: null }));
+    try {
+      let communityId = u.communityId || null;
+      let role = "nuevo";
+      if (u.affiliation === "new-community" && u.pendingCommunityName) {
+        const ref = await addDoc(collection(db, "communities"), {
+          name: u.pendingCommunityName, kind: u.pendingCommunityKind || "comunidad",
+          subcommunities: [], leaderUid: u.uid, leaderName: u.nick, leaderPhone: u.phone || "",
+          ambassadorMainUid: null, ambassadorMainName: "", ambassadorAltUid: null, ambassadorAltName: "",
+          sealDate: new Date().toISOString(), status: "activa", notes: "", createdAt: Date.now(),
+        });
+        communityId = ref.id;
+        role = "lider";
+      }
+      const sello = { active: true, date: new Date().toISOString() };
+      await updateDoc(doc(db, "users", u.uid), { status: "accepted", communityId, role, sello });
+      await setDoc(doc(db, "directory", u.uid), { status: "accepted", communityId, role, sello, branches: [], nick: u.nick }, { merge: true });
+    } catch (e) {
+      setErrors((er) => ({ ...er, [u.uid]: firebaseErrorToMessage(e) || "No se pudo aceptar." }));
     }
-    const sello = { active: true, date: new Date().toISOString() };
-    await updateDoc(doc(db, "users", u.uid), { status: "accepted", communityId, role, sello });
-    await syncDirectory(u.uid, { status: "accepted", communityId, role, sello, branches: [] });
+    setBusyUid(null);
   };
   const reject = async (u) => {
-    await updateDoc(doc(db, "users", u.uid), { status: "rejected" });
-    await syncDirectory(u.uid, { status: "rejected" });
+    setBusyUid(u.uid);
+    setErrors((e) => ({ ...e, [u.uid]: null }));
+    try {
+      await updateDoc(doc(db, "users", u.uid), { status: "rejected" });
+      await setDoc(doc(db, "directory", u.uid), { status: "rejected" }, { merge: true });
+    } catch (e) {
+      setErrors((er) => ({ ...er, [u.uid]: firebaseErrorToMessage(e) || "No se pudo rechazar." }));
+    }
+    setBusyUid(null);
   };
 
   return (
@@ -1550,9 +1682,14 @@ function RequestsManager({ communities }) {
               : "Equipo directo de Argyra"}
           </div>
           {u.motivation && <div className="text-xs text-[#5B5866] italic mb-2">"{u.motivation}"</div>}
+          {errors[u.uid] && <div className="text-xs text-[#E07A7A] mb-2">{errors[u.uid]}</div>}
           <div className="flex gap-2">
-            <button onClick={() => accept(u)} className="flex-1 text-xs py-1.5 rounded-lg bg-[#4E9A6B] text-white flex items-center justify-center gap-1"><CheckCircle2 size={13} /> Aceptar</button>
-            <button onClick={() => reject(u)} className="flex-1 text-xs py-1.5 rounded-lg border border-[#E07A7A] text-[#E07A7A] flex items-center justify-center gap-1"><XCircle size={13} /> Rechazar</button>
+            <button onClick={() => accept(u)} disabled={busyUid === u.uid} className="flex-1 text-xs py-1.5 rounded-lg bg-[#4E9A6B] disabled:opacity-50 text-white flex items-center justify-center gap-1">
+              {busyUid === u.uid ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Aceptar
+            </button>
+            <button onClick={() => reject(u)} disabled={busyUid === u.uid} className="flex-1 text-xs py-1.5 rounded-lg border border-[#E07A7A] disabled:opacity-50 text-[#E07A7A] flex items-center justify-center gap-1">
+              {busyUid === u.uid ? <Loader2 size={13} className="animate-spin" /> : <XCircle size={13} />} Rechazar
+            </button>
           </div>
         </div>
       ))}
@@ -1805,7 +1942,7 @@ export default function App() {
 
   let body;
   if (tab === "communities") body = <CommunitiesScreen record={record} isAdmin={isAdmin} />;
-  else if (tab === "team") body = <TeamScreen />;
+  else if (tab === "team") body = <TeamScreen isAdmin={isAdmin} />;
   else if (tab === "pase") body = <PaseScreen record={record} uid={user.uid} />;
   else if (tab === "leaders") body = <LeadersScreen />;
   else if (tab === "profile") body = <ProfileScreen record={record} uid={user.uid} onLogout={logout} onSaved={refresh} community={community} />;
