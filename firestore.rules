@@ -112,6 +112,14 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
+    // Información editable de cada rama (enlace del grupo y descripción
+    // extendida). Solo un admin puede escribir; cualquier persona con
+    // cuenta puede leerlo.
+    match /branchInfo/{branchKey} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
     // Sistema de pase: solicitud para ser Coordinador de una rama.
     match /passRequests/{id} {
       allow read: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
